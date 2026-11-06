@@ -392,6 +392,8 @@ linux_write_config() {
 
 # DNS is set from ExecStartPost rather than an OpenVPN up script so it runs
 # outside OpenVPN's SELinux/AppArmor confinement, on every distro alike.
+# No Wants=network-online.target: it can stall the start for two minutes, and
+# OpenVPN keeps retrying until the network is there.
 linux_write_service() {
 	has systemctl && [[ -d /run/systemd/system ]] ||
 		die "this Linux client setup needs systemd. Your profile can be used directly with: sudo openvpn --config FILE"
@@ -405,7 +407,6 @@ linux_write_service() {
 [Unit]
 Description=ur-vpn client
 After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=$type

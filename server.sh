@@ -155,8 +155,13 @@ cmd_install() {
 
 show_existing_install() {
 	load_settings
-	local first
-	first=$(find "$CLIENTS_DIR" -maxdepth 1 -name '*.ovpn' -exec basename {} .ovpn \; | sort | head -n 1)
+	local profile first=""
+	for profile in "$CLIENTS_DIR"/*.ovpn; do
+		if [[ -f $profile ]]; then
+			first=$(basename "$profile" .ovpn)
+			break
+		fi
+	done
 	printf 'ur-vpn is already installed, so nothing was changed.\n\n'
 	cmd_status
 	printf '\n'
@@ -679,7 +684,8 @@ firewall_down() {
 
 ipt() { "$IPT" -w 5 "$@"; }
 
-# Some VPS kernels (older OpenVZ/LXC) have no nf_tables, so try the legacy binary.
+# A kernel may only support one backend (older OpenVZ/LXC have no nf_tables, newer
+# ones may have no legacy tables), and the default binary may be either, so try each.
 find_iptables() {
 	local binary
 	for binary in "$1" "$1-nft" "$1-legacy"; do
@@ -845,6 +851,8 @@ write_service() {
 # The distro's own openvpn-server@ unit differs too much between distros (user,
 # paths, a LimitNPROC that breaks containers), so use one known-good unit. Its
 # sandboxing follows upstream's. The '+' runs the firewall hooks outside it.
+# No Wants=network-online.target: it can stall the start for two minutes, and
+# OpenVPN needs no route to listen.
 write_systemd_unit() {
 	local type=simple
 	if openvpn --version 2>/dev/null | grep -q 'enable_systemd=yes'; then
@@ -854,7 +862,6 @@ write_systemd_unit() {
 [Unit]
 Description=ur-vpn OpenVPN server
 After=network-online.target firewalld.service ufw.service nftables.service iptables.service ip6tables.service netfilter-persistent.service
-Wants=network-online.target
 
 [Service]
 Type=$type

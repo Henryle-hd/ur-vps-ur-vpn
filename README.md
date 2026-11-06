@@ -159,4 +159,14 @@ Running the script again is safe. If it's already installed, nothing changes and
 tests/e2e.sh ubuntu:24.04 debian:13
 ```
 
-<!-- TEST-RESULTS -->
+CI runs these on every push, and a merge to `main` publishes a release only if they all pass:
+
+- **Real tunnels:** Ubuntu 24.04 and 26.04, Debian 13, Rocky 9, AlmaLinux 10, Fedora 43, Amazon Linux 2023 and openSUSE Leap 16, plus TCP on port 443, a client without IPv6, ufw, nftables and firewalld. These run in containers on amd64.
+- **macOS:** profile decoding under bash 3.2, and DNS and launchd setup using stand-ins for the system tools. It doesn't connect a real VPN.
+- **Windows:** profile decoding, the real signed OpenVPN install, and the permissions on the private key file. It doesn't connect a real VPN.
+
+Not tested yet:
+
+- A real VPN connection from macOS or Windows
+- SELinux or AppArmor in enforcing mode, and cloud provider firewalls, which containers can't reproduce
+- Arch, Alpine, RHEL, Oracle Linux and CentOS Stream, and older systems with OpenVPN 2.4. The code supports them, but they have not had a tunnel test
