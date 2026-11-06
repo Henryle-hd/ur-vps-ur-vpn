@@ -25,7 +25,7 @@ UR_VPN_RAW=${UR_VPN_RAW:-https://raw.githubusercontent.com/Henryle-hd/ur-vps-ur-
 UR_VPN_RELEASE_URL=${UR_VPN_RELEASE_URL:-https://github.com/Henryle-hd/ur-vps-ur-vpn/releases/latest/download}
 
 # The release workflow stamps this. "dev" means installed from the main branch.
-readonly VERSION=dev
+readonly UR_VPN_VERSION=dev
 
 readonly BIN=/usr/local/bin/ur-vpn
 readonly STATE_DIR=/etc/ur-vpn-client
@@ -701,17 +701,17 @@ cmd_update() {
 	expected=$(awk '$2 == "client.sh" { print $1 }' "$sums")
 	[[ -n $expected && $expected == "$(sha256_of "$new")" ]] || die "the download failed its checksum. Nothing was changed."
 	bash -n "$new" || die "the download is not a valid script. Nothing was changed."
-	version=$(sed -n 's/^readonly VERSION=//p' "$new")
+	version=$(sed -n 's/^readonly UR_VPN_VERSION=//p' "$new")
 	[[ -n $version ]] || die "the download has no version. Nothing was changed."
-	if [[ $version == "$VERSION" ]]; then
-		printf 'Already on the latest release, %s.\n' "$VERSION"
+	if [[ $version == "$UR_VPN_VERSION" ]]; then
+		printf 'Already on the latest release, %s.\n' "$UR_VPN_VERSION"
 		return 0
 	fi
 
 	acquire_sudo
 	$SUDO install -m 755 "$new" "$BIN.new"
 	$SUDO mv -f "$BIN.new" "$BIN"
-	printf 'Updated from %s to %s.\n' "$VERSION" "$version"
+	printf 'Updated from %s to %s.\n' "$UR_VPN_VERSION" "$version"
 }
 
 cmd_remove() {
@@ -756,7 +756,7 @@ main() {
 	status) cmd_status ;;
 	logs) call_platform logs "${2:-30}" ;;
 	update) cmd_update ;;
-	version) printf '%s\n' "$VERSION" ;;
+	version) printf '%s\n' "$UR_VPN_VERSION" ;;
 	remove | uninstall) cmd_remove ;;
 	dns-up) call_platform dns_up ;;
 	dns-down) call_platform dns_down ;;
