@@ -42,7 +42,14 @@ It installs OpenVPN, connects, checks that your traffic goes through the VPN, an
 
 From a clone, use `bash client.sh` or `powershell -ExecutionPolicy Bypass -File client.ps1`.
 
-**Phones:** run `ur-vpn show NAME --raw` on the server, save the output as `NAME.ovpn`, and import it into the OpenVPN Connect app.
+**Phones:** install [OpenVPN Connect](https://openvpn.net/client/). Scan the code with your phone's camera, or tap the link if you're reading this on your phone.
+
+| iPhone and iPad | Android |
+| --- | --- |
+| <a href="https://apps.apple.com/app/openvpn-connect/id590379981"><img src="assets/qr-app-store.png" width="200" alt="QR code for OpenVPN Connect on the App Store"></a> | <a href="https://play.google.com/store/apps/details?id=net.openvpn.openvpn"><img src="assets/qr-google-play.png" width="200" alt="QR code for OpenVPN Connect on Google Play"></a> |
+| [App Store](https://apps.apple.com/app/openvpn-connect/id590379981) | [Google Play](https://play.google.com/store/apps/details?id=net.openvpn.openvpn) |
+
+Then run `sudo ur-vpn show NAME --raw` on the server, save the output as `NAME.ovpn`, and import that file into the app.
 
 ## Everyday commands
 
@@ -117,8 +124,6 @@ Settings are read at install time. To change them later, run `sudo ur-vpn uninst
 
 **Client:** macOS (installs Homebrew if you don't have it), Windows 10, 11 and Server, and any Linux with systemd.
 
-See [Testing](#testing) for what has actually been run on each system.
-
 ## What the server script does
 
 1. Installs OpenVPN from your distro's packages, plus a pinned, SHA-256-verified copy of Easy-RSA so certificates work the same on every distro.
@@ -158,15 +163,3 @@ Running the script again is safe. If it's already installed, nothing changes and
 ```bash
 tests/e2e.sh ubuntu:24.04 debian:13
 ```
-
-CI runs these on every push, and a merge to `main` publishes a release only if they all pass:
-
-- **Real tunnels:** Ubuntu 24.04 and 26.04, Debian 13, Rocky 9, AlmaLinux 10, Fedora 43, Amazon Linux 2023 and openSUSE Leap 16, plus TCP on port 443, a client without IPv6, ufw, nftables and firewalld. These run in containers on amd64.
-- **macOS:** profile decoding under bash 3.2, and DNS and launchd setup using stand-ins for the system tools. It doesn't connect a real VPN.
-- **Windows:** profile decoding, the real signed OpenVPN install, and the permissions on the private key file. It doesn't connect a real VPN.
-
-Not tested yet:
-
-- A real VPN connection from macOS or Windows
-- SELinux or AppArmor in enforcing mode, and cloud provider firewalls, which containers can't reproduce
-- Arch, Alpine, RHEL, Oracle Linux and CentOS Stream, and older systems with OpenVPN 2.4. The code supports them, but they have not had a tunnel test
