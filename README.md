@@ -56,7 +56,7 @@ On the server:
 | `sudo ur-vpn list` | List clients |
 | `sudo ur-vpn start` | Start the VPN, and start it at boot |
 | `sudo ur-vpn stop` | Stop the VPN, and keep it off, even after a reboot, until you start it |
-| `sudo ur-vpn restart` | Restart the VPN. Clients reconnect within seconds |
+| `sudo ur-vpn restart` | Restart the VPN. Clients reconnect by themselves, usually within seconds |
 | `sudo ur-vpn status` | Show the service state and who is connected |
 | `sudo ur-vpn logs` | Show the recent log |
 | `sudo ur-vpn update` | Move to the latest release |
@@ -85,7 +85,7 @@ On devices, `on` and `off` still work as other names for `start` and `stop`.
 
 `update` downloads the latest [release](https://github.com/Henryle-hd/ur-vps-ur-vpn/releases), checks it against the release's `SHA256SUMS`, and replaces the installed command. The checksum catches a damaged download. It can't protect against a compromised GitHub account, because the file and its checksum come from the same place.
 
-On the server, it also rewrites the OpenVPN config and service from your saved settings. If either changed, the server restarts and clients reconnect within seconds. If nothing changed, nobody is disconnected. If the new version won't start, the server goes back to the old one.
+On the server, it also rewrites the OpenVPN config and service from your saved settings. If either changed, the server restarts and clients reconnect by themselves, usually within seconds. If nothing changed, nobody is disconnected. If the new version won't start, the server goes back to the old one.
 
 On a device, only the command changes, so the VPN stays connected, or stays off if you turned it off.
 

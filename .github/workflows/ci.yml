@@ -81,7 +81,7 @@ jobs:
             server_prep: apt-get update -qq && apt-get install -y -qq ufw && ufw --force enable
           - name: nftables
             image: "debian:13"
-            server_prep: apt-get update -qq && apt-get install -y -qq nftables && systemctl enable --now nftables
+            server_prep: apt-get update -qq && apt-get install -y -qq nftables && echo '#!/usr/sbin/nft -f' >/etc/nftables.conf && systemctl enable --now nftables
           - name: firewalld
             image: "rockylinux/rockylinux:9"
             server_prep: dnf install -y -q firewalld && systemctl enable --now firewalld

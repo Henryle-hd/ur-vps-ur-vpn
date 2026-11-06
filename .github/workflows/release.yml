@@ -44,10 +44,10 @@ jobs:
             version="v$major.$minor.$((patch + 1))"
           fi
 
-          sed -i "s/^readonly VERSION=dev\$/readonly VERSION=$version/" server.sh client.sh
+          sed -i "s/^readonly UR_VPN_VERSION=dev\$/readonly UR_VPN_VERSION=$version/" server.sh client.sh
           sed -i "s/^\\\$Version = 'dev'/\\\$Version = '$version'/" client.ps1
-          grep -q "^readonly VERSION=$version\$" server.sh
-          grep -q "^readonly VERSION=$version\$" client.sh
+          grep -q "^readonly UR_VPN_VERSION=$version\$" server.sh
+          grep -q "^readonly UR_VPN_VERSION=$version\$" client.sh
           grep -q "^\\\$Version = '$version'" client.ps1
 
           sha256sum server.sh client.sh client.ps1 >SHA256SUMS

@@ -120,11 +120,11 @@ cp "$WORK/client.sh" "$BIN"
 UR_VPN_RELEASE_URL=file://$WORK/release
 
 publish_release() {
-	sed "s/^readonly VERSION=dev\$/readonly VERSION=$1/" "$WORK/client.sh" >"$WORK/release/client.sh"
+	sed "s/^readonly UR_VPN_VERSION=dev\$/readonly UR_VPN_VERSION=$1/" "$WORK/client.sh" >"$WORK/release/client.sh"
 	printf '%s  client.sh\n' "$(sha256_of "$WORK/release/client.sh")" >"$WORK/release/SHA256SUMS"
 }
 
-installed_version() { sed -n 's/^readonly VERSION=//p' "$BIN"; }
+installed_version() { sed -n 's/^readonly UR_VPN_VERSION=//p' "$BIN"; }
 
 says_up_to_date() { cmd_update | grep -q 'Already on the latest'; }
 

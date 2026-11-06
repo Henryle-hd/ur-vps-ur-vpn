@@ -25,7 +25,7 @@ UR_VPN_RAW=${UR_VPN_RAW:-https://raw.githubusercontent.com/Henryle-hd/ur-vps-ur-
 UR_VPN_RELEASE_URL=${UR_VPN_RELEASE_URL:-https://github.com/Henryle-hd/ur-vps-ur-vpn/releases/latest/download}
 
 # The release workflow stamps this. "dev" means installed from the main branch.
-readonly VERSION=dev
+readonly UR_VPN_VERSION=dev
 
 readonly EASYRSA_VERSION=3.2.7
 readonly EASYRSA_SHA256=308743bc9fe871b902d47dbe98d749daff3a05b27531684f02625ce7208d4598
@@ -254,7 +254,7 @@ check_tun() {
 
 install_packages() {
 	step "Installing OpenVPN and dependencies with $PACKAGE_MANAGER"
-	local packages=(openvpn openssl iptables ca-certificates tar gzip)
+	local packages=(openvpn openssl ca-certificates tar gzip)
 	has curl || packages+=(curl) # asking for it on RHEL-family systems conflicts with curl-minimal
 
 	case $PACKAGE_MANAGER in
@@ -265,25 +265,26 @@ install_packages() {
 		local apt=(apt-get -o DPkg::Lock::Timeout=300)
 		quiet "${apt[@]}" update
 		quiet "${apt[@]}" -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-			install -y --no-install-recommends "${packages[@]}" iproute2 procps
+			install -y --no-install-recommends "${packages[@]}" iptables iproute2 procps
 		;;
 	dnf | yum)
 		enable_epel
 		if selinux_enforcing; then
 			packages+=(policycoreutils-python-utils)
 		fi
-		quiet "$PACKAGE_MANAGER" install -y "${packages[@]}" iproute procps-ng
+		# Plain "iptables" can resolve to iptables-legacy, which newer kernels may not run.
+		quiet "$PACKAGE_MANAGER" install -y "${packages[@]}" iptables-nft iproute procps-ng
 		;;
 	zypper)
 		quiet zypper --non-interactive --gpg-auto-import-keys install --no-recommends \
-			"${packages[@]}" iproute2 procps
+			"${packages[@]}" iptables iproute2 procps
 		;;
 	pacman)
 		# Arch does not support partial upgrades, so -Syu is required here.
-		quiet pacman -Syu --needed --noconfirm "${packages[@]}" iproute2 procps-ng
+		quiet pacman -Syu --needed --noconfirm "${packages[@]}" iptables iproute2 procps-ng
 		;;
 	apk)
-		quiet apk add --no-cache "${packages[@]}" ip6tables iproute2 coreutils
+		quiet apk add --no-cache "${packages[@]}" iptables ip6tables iproute2 coreutils
 		;;
 	esac
 	has openvpn || die "OpenVPN did not install"
@@ -681,7 +682,7 @@ ipt() { "$IPT" -w 5 "$@"; }
 # Some VPS kernels (older OpenVZ/LXC) have no nf_tables, so try the legacy binary.
 find_iptables() {
 	local binary
-	for binary in "$1" "$1-legacy"; do
+	for binary in "$1" "$1-nft" "$1-legacy"; do
 		if has "$binary" && "$binary" -w 5 -S INPUT >/dev/null 2>&1; then
 			printf '%s' "$binary"
 			return 0
@@ -722,7 +723,7 @@ ipt_allow_vpn_out() {
 }
 
 firewall_up_iptables() {
-	IPT=$(find_iptables iptables) || die "iptables is not usable on this kernel"
+	IPT=$(find_iptables iptables) || die "iptables is not usable on this kernel: $(iptables -w 5 -S INPUT 2>&1 | tail -n 1)"
 	ipt_fresh_chain filter UR_VPN_IN
 	ipt -A UR_VPN_IN -p "$PROTO" --dport "$PORT" -j ACCEPT
 	ipt -A UR_VPN_IN -i "$TUN_DEV" -p icmp -j ACCEPT
@@ -1195,7 +1196,7 @@ cmd_start() {
 	step "Starting the $SERVICE service"
 	start_service
 	verify_server
-	printf 'Started. Clients reconnect by themselves within seconds.\n'
+	printf 'Started. Clients reconnect by themselves, usually within seconds.\n'
 }
 
 cmd_stop() {
@@ -1210,7 +1211,7 @@ cmd_restart() {
 	step "Restarting the $SERVICE service"
 	start_service
 	verify_server
-	printf 'Restarted. Clients reconnect by themselves within seconds.\n'
+	printf 'Restarted. Clients reconnect by themselves, usually within seconds.\n'
 }
 
 cmd_logs() {
@@ -1225,13 +1226,13 @@ cmd_update() {
 
 	step "Checking for a new release"
 	download_release "$UPDATE_DIR"
-	version=$(sed -n 's/^readonly VERSION=//p' "$UPDATE_DIR/server.sh")
-	if [[ $version == "$VERSION" ]]; then
-		printf 'Already on the latest release, %s.\n' "$VERSION"
+	version=$(sed -n 's/^readonly UR_VPN_VERSION=//p' "$UPDATE_DIR/server.sh")
+	if [[ $version == "$UR_VPN_VERSION" ]]; then
+		printf 'Already on the latest release, %s.\n' "$UR_VPN_VERSION"
 		return 0
 	fi
 
-	step "Updating from $VERSION to $version"
+	step "Updating from $UR_VPN_VERSION to $version"
 	if service_is_active; then
 		was_running=yes
 	fi
@@ -1247,7 +1248,7 @@ cmd_update() {
 	if [[ $was_running == yes ]]; then
 		restart_service || true
 	fi
-	die "the update to $version failed, so the server went back to $VERSION. See: ur-vpn logs"
+	die "the update to $version failed, so the server went back to $UR_VPN_VERSION. See: ur-vpn logs"
 }
 
 download_release() {
@@ -1261,7 +1262,7 @@ download_release() {
 	actual=$(sha256sum "$dir/server.sh" | cut -d' ' -f1)
 	[[ -n $expected && $expected == "$actual" ]] || die "the download failed its checksum. Nothing was changed."
 	bash -n "$dir/server.sh" || die "the download is not a valid script. Nothing was changed."
-	grep -q '^readonly VERSION=' "$dir/server.sh" || die "the download has no version. Nothing was changed."
+	grep -q '^readonly UR_VPN_VERSION=' "$dir/server.sh" || die "the download has no version. Nothing was changed."
 }
 
 # The rename is atomic, and a script already running keeps reading the old file.
@@ -1281,7 +1282,7 @@ cmd_apply_update() {
 	if [[ $(installed_config | cksum) == "$before" ]] || ! service_is_active; then
 		return 0
 	fi
-	step "Restarting the service. Clients reconnect by themselves within seconds."
+	step "Restarting the service. Clients reconnect by themselves, usually within seconds."
 	restart_service
 	verify_server
 }
@@ -1350,7 +1351,7 @@ main() {
 		return 0
 		;;
 	version)
-		printf '%s\n' "$VERSION"
+		printf '%s\n' "$UR_VPN_VERSION"
 		return 0
 		;;
 	esac

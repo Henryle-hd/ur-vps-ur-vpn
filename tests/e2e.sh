@@ -66,7 +66,7 @@ systemd_install_command() {
 	local rpm='command -v dnf >/dev/null && PM=dnf || PM=yum; $PM install -y -q systemd dbus util-linux iproute procps-ng gzip tar hostname >/dev/null 2>&1 || $PM install -y -q systemd dbus-daemon util-linux iproute procps-ng gzip tar >/dev/null; $PM install -y -q util-linux-script >/dev/null 2>&1 || true'
 	case $1 in
 	ubuntu* | debian*) echo 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends systemd systemd-sysv dbus curl ca-certificates util-linux >/dev/null' ;;
-	*suse*) echo 'zypper -q -n install --no-recommends systemd systemd-sysvinit dbus-1 curl util-linux iproute2 gzip tar >/dev/null' ;;
+	*suse*) echo 'zypper -q -n install --no-recommends systemd dbus-1 curl util-linux iproute2 gzip tar >/dev/null' ;;
 	*archlinux*) echo 'pacman -Sy --noconfirm --needed systemd dbus curl util-linux >/dev/null' ;;
 	*) echo "$rpm" ;;
 	esac
@@ -99,7 +99,7 @@ systemd_is_ready() {
 start_node() {
 	local name=$1 _
 	shift
-	run_container "$name" "$PREPARED_IMAGE" /sbin/init "$@" || return 1
+	run_container "$name" "$PREPARED_IMAGE" /usr/lib/systemd/systemd "$@" || return 1
 	for _ in $(seq 1 40); do
 		systemd_is_ready "$name" && return 0
 		sleep 1
@@ -216,15 +216,16 @@ test_rerun() {
 publish_release() {
 	local container=$1 script=$2 version=$3 edit=${4:-}
 	docker exec "$container" sh -c "mkdir -p /tmp/release && cd /tmp/release &&
-		sed -e 's/^readonly VERSION=dev\$/readonly VERSION=$version/' ${edit:+-e '$edit'} /repo/$script >$script &&
+		sed -e 's/^readonly UR_VPN_VERSION=dev\$/readonly UR_VPN_VERSION=$version/' ${edit:+-e '$edit'} /repo/$script >$script &&
 		sha256sum $script >SHA256SUMS"
 }
 
 server_pid() { on_server 'systemctl show -p MainPID --value ur-vpn-server'; }
 
 # Not every image has ping, so ask each end. The status file refreshes every 10s.
+# 150s: a client that misses the server's goodbye waits out its 120s ping-restart.
 server_sees_client() {
-	on_server "for i in \$(seq 1 90); do grep -q '^CLIENT_LIST,client1,' $SERVER_STATUS && exit 0; sleep 1; done; exit 1"
+	on_server "for i in \$(seq 1 150); do grep -q '^CLIENT_LIST,client1,' $SERVER_STATUS && exit 0; sleep 1; done; exit 1"
 }
 
 client_says_connected() {
