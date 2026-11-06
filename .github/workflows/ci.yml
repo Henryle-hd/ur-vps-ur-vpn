@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A newer push replaces a run on a branch. On main, each run can lead to a release.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Shell scripts
+        run: shellcheck -S warning server.sh client.sh tests/e2e.sh tests/client_logic.sh
+      - name: client.ps1 is plain ASCII
+        run: |
+          if LC_ALL=C grep -n '[^[:print:][:space:]]' client.ps1; then
+            echo "Windows PowerShell 5.1 misreads UTF-8 without a BOM."
+            exit 1
+          fi
+
+  client-logic:
+    name: client logic (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: /bin/bash tests/client_logic.sh
+
+  client-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Decode profiles and install OpenVPN
+        shell: powershell
+        run: .\tests\client_windows.ps1 -Install
+
+  tunnel:
+    name: tunnel (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Ubuntu 24.04, image: "ubuntu:24.04" }
+          - { name: Ubuntu 26.04, image: "ubuntu:26.04" }
+          - { name: Debian 13, image: "debian:13" }
+          - { name: Rocky 9, image: "rockylinux/rockylinux:9" }
+          - { name: AlmaLinux 10, image: "almalinux:10" }
+          - { name: Fedora 43, image: "fedora:43" }
+          - { name: Amazon Linux 2023, image: "amazonlinux:2023" }
+          - { name: openSUSE Leap 16, image: "opensuse/leap:16.0" }
+          - name: TCP on 443
+            image: "ubuntu:24.04"
+            server_env: VPN_PROTO=tcp VPN_PORT=443
+          - name: client without IPv6
+            image: "debian:13"
+            client_args: --sysctl net.ipv6.conf.all.disable_ipv6=1
+          - name: ufw
+            image: "ubuntu:24.04"
+            server_prep: apt-get update -qq && apt-get install -y -qq ufw && ufw --force enable
+          - name: nftables
+            image: "debian:13"
+            server_prep: apt-get update -qq && apt-get install -y -qq nftables && systemctl enable --now nftables
+          - name: firewalld
+            image: "rockylinux/rockylinux:9"
+            server_prep: dnf install -y -q firewalld && systemctl enable --now firewalld
+    env:
+      IMAGE: ${{ matrix.image }}
+      SERVER_ENV: ${{ matrix.server_env }}
+      SERVER_PREP: ${{ matrix.server_prep }}
+      CLIENT_ARGS: ${{ matrix.client_args || '--sysctl net.ipv6.conf.all.disable_ipv6=0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash tests/e2e.sh "$IMAGE"

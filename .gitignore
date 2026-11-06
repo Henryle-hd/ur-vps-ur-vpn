@@ -1,0 +1,4 @@
+# VPN profiles contain private keys. Never commit them.
+*.ovpn
+*.key
+*.pem
