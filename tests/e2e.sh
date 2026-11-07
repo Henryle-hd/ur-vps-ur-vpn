@@ -310,6 +310,13 @@ test_client_management() {
 	check "ur-vpn add creates a client" on_server 'ur-vpn add phone'
 	check "rejects unsafe client names" on_server '! ur-vpn add "../../evil"'
 	check "--raw prints a full .ovpn" on_server 'ur-vpn show phone --raw | grep -q "<tls-crypt"'
+	check "ur-vpn app saves an existing client" on_server '
+		ur-vpn app phone && grep -q "<tls-crypt" /root/phone.ovpn && [ "$(stat -c %a /root/phone.ovpn)" = 600 ]'
+	check "ur-vpn app creates a new client for the sudo user" on_server '
+		echo "apptester:x:4321:4321::/home/apptester:/bin/sh" >>/etc/passwd && mkdir -p /home/apptester &&
+		SUDO_USER=apptester ur-vpn app tablet && [ "$(stat -c %U /home/apptester/tablet.ovpn)" = apptester ] &&
+		ur-vpn list | grep -q tablet'
+	check "ur-vpn app rejects unsafe client names" on_server '! ur-vpn app "../../evil"'
 
 	check "ur-vpn revoke succeeds" on_server 'ur-vpn revoke client1'
 	check "ur-vpn list shows it revoked" on_server 'ur-vpn list | grep -E "client1 +revoked"'

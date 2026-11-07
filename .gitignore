@@ -2,3 +2,4 @@
 *.ovpn
 *.key
 *.pem
+.gstack/
