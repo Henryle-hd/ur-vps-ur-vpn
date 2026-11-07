@@ -1069,7 +1069,8 @@ This machine's firewall is done, but a script cannot change your provider's.
 
 ${BOLD}Manage it later on this server:${RESET}
   ur-vpn add NAME      new client for another device
-  ur-vpn show NAME     show a client's paste block again (--raw for an .ovpn file, for phones)
+  ur-vpn show NAME     show a client's paste block again (--raw for .ovpn text)
+  ur-vpn app NAME      save an .ovpn file for the OpenVPN Connect app
   ur-vpn revoke NAME   cut off a client
   ur-vpn list | status | logs | uninstall
 
@@ -1142,6 +1143,20 @@ cmd_show() {
 	else
 		print_client_steps "$name"
 	fi
+}
+
+# Saves to the home folder of whoever ran sudo, so they can copy the file off.
+cmd_app() {
+	load_settings
+	local name=${1:-} owner=${SUDO_USER:-root} home
+	check_name "$name" "ur-vpn app NAME"
+	if [[ ! -f $CLIENTS_DIR/$name.ovpn ]]; then
+		build_profile "$name"
+	fi
+	home=$(getent passwd "$owner" | cut -d: -f6) || true
+	[[ -d $home ]] || die "could not find the home folder of $owner"
+	install -m 600 -o "$owner" "$CLIENTS_DIR/$name.ovpn" "$home/$name.ovpn"
+	printf 'Saved %s\nImport it into the OpenVPN Connect app, then delete this copy.\n' "$home/$name.ovpn"
 }
 
 cmd_revoke() {
@@ -1336,6 +1351,7 @@ ur-vpn: OpenVPN server manager
   server.sh               install everything (safe to re-run)
   ur-vpn add NAME         create a client and print its paste block
   ur-vpn show NAME        print a client's paste block  (--raw: .ovpn text)
+  ur-vpn app NAME         save an .ovpn file for the OpenVPN Connect app
   ur-vpn revoke NAME      revoke a client and disconnect it
   ur-vpn list             list clients
   ur-vpn start            start the VPN, and start it at boot
@@ -1372,6 +1388,7 @@ main() {
 	install) cmd_install ;;
 	add) cmd_add "$@" ;;
 	show) cmd_show "$@" ;;
+	app) cmd_app "$@" ;;
 	revoke) cmd_revoke "$@" ;;
 	list) cmd_list ;;
 	start) cmd_start ;;

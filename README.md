@@ -49,7 +49,7 @@ From a clone, use `bash client.sh` or `powershell -ExecutionPolicy Bypass -File 
 | <a href="https://apps.apple.com/app/openvpn-connect/id590379981"><img src="assets/qr-app-store.png" width="200" alt="QR code for OpenVPN Connect on the App Store"></a> | <a href="https://play.google.com/store/apps/details?id=net.openvpn.openvpn"><img src="assets/qr-google-play.png" width="200" alt="QR code for OpenVPN Connect on Google Play"></a> |
 | [App Store](https://apps.apple.com/app/openvpn-connect/id590379981) | [Google Play](https://play.google.com/store/apps/details?id=net.openvpn.openvpn) |
 
-Then run `sudo ur-vpn show NAME --raw` on the server, save the output as `NAME.ovpn`, and import that file into the app.
+Then run `sudo ur-vpn app NAME` on the server and import the saved `NAME.ovpn` file into the app.
 
 ## Everyday commands
 
@@ -59,6 +59,7 @@ On the server:
 | --- | --- |
 | `sudo ur-vpn add laptop` | Create a client for another device and print its block |
 | `sudo ur-vpn show laptop` | Print a client's block again (`--raw` for an `.ovpn` file) |
+| `sudo ur-vpn app phone` | Save a client's `.ovpn` file for the OpenVPN Connect app |
 | `sudo ur-vpn revoke laptop` | Cut off a client right away |
 | `sudo ur-vpn list` | List clients |
 | `sudo ur-vpn start` | Start the VPN, and start it at boot |
