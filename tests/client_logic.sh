@@ -243,6 +243,12 @@ expect "top: slow on packet loss" health_is 1 10 2 0 "20.5" "slow"
 expect "top: one lost ping is not an outage" health_is 1 1 1 1 "" "good"
 expect "top: no internet after several lost pings" health_is 1 5 3 3 "" "no internet"
 
+says_connected_without_ping() {
+	has() { return 1; }
+	health_is 1 0 0 0 "" "connected"
+}
+expect "top: a device with no ping still says connected" says_connected_without_ping
+
 record_halves() {
 	TOP_SENT=39 TOP_LOST=4
 	top_record_ping ""

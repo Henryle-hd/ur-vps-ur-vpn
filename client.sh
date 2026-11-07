@@ -827,6 +827,8 @@ top_health() {
 	local latency=${TOP_LATENCY%%.*}
 	if [[ -z $TOP_RX ]]; then
 		printf '%snot connected%s  Connect with: ur-vpn start' "$RED" "$RESET"
+	elif ! has ping; then
+		printf '%sconnected%s' "$GREEN" "$RESET"
 	elif ((TOP_SENT == 0)); then
 		printf '%schecking%s' "$YELLOW" "$RESET"
 	elif ((TOP_MISSES >= 3)); then

@@ -1536,10 +1536,14 @@ top_activity() {
 			sub(/:[0-9]+.*$/, "", from)
 			event = name " connected from " from
 		}
-		/client-instance (exiting|restarting)/ && match($0, /[A-Za-z0-9_-]+\/[0-9a-fA-F:.]+ SIG/) {
-			name = substr($0, RSTART, RLENGTH)
-			sub(/\/.*/, "", name)
-			event = name " disconnected"
+		/CC-EEN exit message|client-instance (exiting|restarting)/ && match($0, /[A-Za-z0-9_-]+\/[0-9a-fA-F:.]+ /) {
+			session = substr($0, RSTART, RLENGTH)
+			if (!(session in gone)) {
+				gone[session] = 1
+				name = session
+				sub(/\/.*/, "", name)
+				event = name " disconnected"
+			}
 		}
 		/certificate revoked/ && match($0, /CN=[A-Za-z0-9_-]+/) {
 			event = "refused revoked client " substr($0, RSTART + 3, RLENGTH - 3)
@@ -1571,7 +1575,7 @@ top_machine() {
 		FILENAME ~ /meminfo/ && $1 == "MemAvailable:" { free = $2 }
 		FILENAME ~ /uptime/ { up = $1 }
 		END {
-			printf "load %s   memory %d%%   up %s", load, total > 0 ? (total - free) * 100 / total : 0, duration(up)
+			printf("load %s   memory %d%%   up %s", load, (total > 0 ? (total - free) * 100 / total : 0), duration(up))
 		}' /proc/loadavg /proc/meminfo /proc/uptime
 }
 
