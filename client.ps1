@@ -8,15 +8,16 @@
 #
 # From a clone:
 #
-#     powershell -ExecutionPolicy Bypass -File client.ps1 [-Action install|start|stop|restart|status|update|version|remove] [-ProfilePath FILE]
+#     powershell -ExecutionPolicy Bypass -File client.ps1 [-Action install|start|stop|restart|status|top|update|version|remove] [-ProfilePath FILE]
 #
 # Keep this file plain ASCII: Windows PowerShell 5.1 misreads UTF-8 without a BOM.
 # Do not add #Requires: it is an err    or under Invoke-Expression.
 
 param(
-    [ValidateSet('install', 'start', 'stop', 'restart', 'on', 'off', 'status', 'update', 'version', 'remove')]
+    [ValidateSet('install', 'start', 'stop', 'restart', 'on', 'off', 'status', 'top', 'update', 'version', 'remove')]
     [string]$Action = 'install',
-    [string]$ProfilePath = ''
+    [string]$ProfilePath = '',
+    [switch]$Once
 )
 
 $ErrorActionPreference = 'Stop'
@@ -343,6 +344,146 @@ function Show-Status {
     Write-Host "Public IP: $address"
 }
 
+# --- The live view ------------------------------------------------------------
+
+function Format-Bytes([double]$Bytes) {
+    $units = 'B', 'KB', 'MB', 'GB', 'TB'
+    $index = 0
+    while (($Bytes -ge 1024) -and ($index -lt 4)) {
+        $Bytes /= 1024
+        $index++
+    }
+    if ($index -eq 0) { return ('{0:0} B' -f $Bytes) }
+    return ('{0:0.0} {1}' -f $Bytes, $units[$index])
+}
+
+# Networks drop the odd packet, so one lost ping means nothing: it takes several
+# in a row to say the internet is gone, and a few pings to judge the loss.
+function Get-VpnHealth([bool]$Connected, $LatencyMs, [int]$Sent, [int]$Lost, [int]$Misses) {
+    if (-not $Connected) { return 'not connected' }
+    if ($Sent -eq 0) { return 'checking' }
+    if ($Misses -ge 3) { return 'no internet' }
+    if (($null -ne $LatencyMs) -and ($LatencyMs -ge 300)) { return 'slow' }
+    if (($Sent -ge 5) -and (($Lost * 100 / $Sent) -ge 10)) { return 'slow' }
+    return 'good'
+}
+
+# The adapter internet traffic leaves by, if it is OpenVPN's.
+function Get-VpnAdapter {
+    try {
+        $route = Find-NetRoute -RemoteIPAddress '1.1.1.1' -ErrorAction Stop | Where-Object { $_.InterfaceAlias } | Select-Object -First 1
+        if (-not $route) { return $null }
+        $adapter = Get-NetAdapter -InterfaceAlias $route.InterfaceAlias -ErrorAction Stop
+        if ($adapter.InterfaceDescription -match 'OpenVPN|TAP-Win|Wintun') { return $adapter }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
+function Get-PingMs {
+    try {
+        $reply = (New-Object Net.NetworkInformation.Ping).Send('1.1.1.1', 1000)
+        if ($reply.Status -eq 'Success') { return [int]$reply.RoundtripTime }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
+function Get-PublicIp {
+    try {
+        return (Invoke-RestMethod -Uri 'https://api.ipify.org' -TimeoutSec 3).ToString().Trim()
+    } catch {
+        return 'unknown'
+    }
+}
+
+function Write-TopFrame($State) {
+    $health = Get-VpnHealth $State.Connected $State.LatencyMs $State.Sent $State.Lost $State.Misses
+    $color = switch ($health) {
+        'good' { 'Green' }
+        { $_ -in 'slow', 'checking' } { 'Yellow' }
+        default { 'Red' }
+    }
+    Write-Host "ur-vpn top  $Version   $(Get-Date -Format 'HH:mm:ss')   press q to quit"
+    Write-Host ''
+    Write-Host 'Health     ' -NoNewline
+    Write-Host $health -ForegroundColor $color
+    if (-not $State.Connected) {
+        Write-Host 'Connect with: -Action start'
+        return
+    }
+    Write-Host 'VPN        connected'
+    Write-Host "Public IP  $($State.PublicIp)"
+    $loss = if ($State.Sent -gt 0) { [int]($State.Lost * 100 / $State.Sent) } else { 0 }
+    $latency = if ($null -eq $State.LatencyMs) { 'no reply' } else { "$($State.LatencyMs) ms" }
+    Write-Host "Latency    $latency   loss $loss%"
+    Write-Host ('Speed      down {0,-12} up {1}' -f ((Format-Bytes $State.DownRate) + '/s'), ((Format-Bytes $State.UpRate) + '/s'))
+    Write-Host ('Total      down {0,-12} up {1}' -f (Format-Bytes $State.Down), (Format-Bytes $State.Up))
+}
+
+function Update-TopState($State) {
+    $adapter = Get-VpnAdapter
+    $State.Connected = [bool]$adapter
+    if (-not $adapter) {
+        $State.DownRate = 0
+        $State.UpRate = 0
+        return
+    }
+    $stats = Get-NetAdapterStatistics -Name $adapter.Name
+    $now = Get-Date
+    $seconds = ($now - $State.At).TotalSeconds
+    if (($State.At -ne [datetime]::MinValue) -and ($seconds -gt 0) -and ($stats.ReceivedBytes -ge $State.Down)) {
+        $State.DownRate = ($stats.ReceivedBytes - $State.Down) / $seconds
+        $State.UpRate = [Math]::Max(0, ($stats.SentBytes - $State.Up) / $seconds)
+    }
+    $State.Down = $stats.ReceivedBytes
+    $State.Up = $stats.SentBytes
+    $State.At = $now
+
+    $State.LatencyMs = Get-PingMs
+    $State.Sent++
+    if ($null -eq $State.LatencyMs) {
+        $State.Lost++
+        $State.Misses++
+    } else {
+        $State.Misses = 0
+    }
+    if ($State.Sent -ge 40) {
+        $State.Sent = [int]($State.Sent / 2)
+        $State.Lost = [int]($State.Lost / 2)
+    }
+    if (($State.Ticks % 30) -eq 0) { $State.PublicIp = Get-PublicIp }
+    $State.Ticks++
+}
+
+function Show-Top([bool]$PrintOnce) {
+    $state = @{
+        Connected = $false; LatencyMs = $null; Sent = 0; Lost = 0; Misses = 0; Ticks = 0; PublicIp = 'checking'
+        Down = 0; Up = 0; DownRate = 0; UpRate = 0; At = [datetime]::MinValue
+    }
+    if ($PrintOnce -or [Console]::IsOutputRedirected -or [Console]::IsInputRedirected) {
+        Update-TopState $state
+        Start-Sleep -Seconds 1
+        Update-TopState $state
+        Write-TopFrame $state
+        return
+    }
+    while ($true) {
+        Update-TopState $state
+        Clear-Host
+        Write-TopFrame $state
+        $deadline = (Get-Date).AddSeconds(1)
+        while ((Get-Date) -lt $deadline) {
+            if ([Console]::KeyAvailable) {
+                if ([Console]::ReadKey($true).KeyChar -in 'q', 'Q') { return }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 # Only this script changes: the VPN stays as it is, connected or off.
 function Update-Vpn {
     $work = Join-Path $env:TEMP ('ur-vpn-' + [guid]::NewGuid().ToString('N'))
@@ -419,6 +560,10 @@ function Invoke-Main {
 
     if ($Action -eq 'version') {
         Write-Host $Version
+        return
+    }
+    if ($Action -eq 'top') {
+        Show-Top $Once.IsPresent
         return
     }
     if (-not (Test-Admin)) {

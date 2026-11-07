@@ -32,6 +32,7 @@ readonly EASYRSA_SHA256=308743bc9fe871b902d47dbe98d749daff3a05b27531684f02625ce7
 
 readonly STATE_DIR=/etc/ur-vpn
 readonly SETTINGS=$STATE_DIR/settings.env
+readonly USER_SETTINGS=$STATE_DIR/ur-vpn.conf
 readonly INSTALLED_MARK=$STATE_DIR/.installed
 readonly PKI_DIR=$STATE_DIR/easy-rsa
 readonly CLIENTS_DIR=$STATE_DIR/clients
@@ -41,6 +42,7 @@ readonly OVPN_DIR=/etc/openvpn/server/ur-vpn
 readonly TUN_DEV=urvpn0
 readonly SERVICE=ur-vpn-server
 readonly STATUS_FILE=/run/openvpn-server/status-ur-vpn.log
+readonly STATUS_SECONDS=2
 
 readonly BIN=/usr/local/bin/ur-vpn
 readonly LOG=/var/log/ur-vpn-install.log
@@ -140,6 +142,7 @@ cmd_install() {
 	check_tun # the packages may have pulled in a new kernel
 	prepare_settings
 	load_settings
+	write_user_settings
 	setup_pki
 	write_server_config
 	install -m 755 "$SELF" "$BIN" # the service's firewall hooks call this copy
@@ -345,11 +348,75 @@ prepare_settings() {
 	if openvpn_is_legacy; then TLS_MODE=legacy; fi
 
 	install -d -m 700 "$STATE_DIR"
+	save_settings
+}
+
+save_settings() {
 	local name
-	for name in NIC PROTO PORT NET_BASE HOST DNS_SERVERS NET6 SERVER_CN IPV6_EGRESS TLS_MODE; do
-		printf '%s=%q\n' "$name" "${!name}"
-	done >"$SETTINGS"
-	chmod 600 "$SETTINGS"
+	for name in NIC PROTO PORT NET_BASE HOST DNS_SERVERS NET6 SERVER_CN IPV6_EGRESS TLS_MODE FW_ADDED_MASQ; do
+		if [[ -n ${!name:-} ]]; then
+			printf '%s=%q\n' "$name" "${!name}"
+		fi
+	done >"$SETTINGS.new"
+	chmod 600 "$SETTINGS.new"
+	mv -f "$SETTINGS.new" "$SETTINGS"
+}
+
+# The settings a person may change. Everything else in $SETTINGS was worked out
+# together at install and has to stay as it is.
+write_user_settings() {
+	[[ ! -f $USER_SETTINGS ]] || return 0
+	cat >"$USER_SETTINGS" <<EOF
+# ur-vpn settings. After changing this file, run: sudo ur-vpn apply
+#
+# Changing HOST, PORT or PROTO means setting up every device again, because each
+# device's profile holds them.
+
+# Address devices connect to: an IP address or a domain name.
+HOST=$HOST
+
+# Port to listen on, 1-65535.
+PORT=$PORT
+
+# udp is faster. tcp gets through more restrictive networks.
+PROTO=$PROTO
+
+# DNS servers for devices, separated by spaces.
+DNS=$DNS_SERVERS
+EOF
+	chmod 600 "$USER_SETTINGS"
+}
+
+# Reads $USER_SETTINGS into NEW_*. It is parsed rather than sourced, so a typo in
+# it can never run as a command.
+read_user_settings() {
+	NEW_HOST=$HOST NEW_PORT=$PORT NEW_PROTO=$PROTO NEW_DNS=$DNS_SERVERS
+	local line key value number=0
+	local pattern='^[[:space:]]*([A-Za-z_]+)[[:space:]]*=[[:space:]]*(.*)$'
+	while IFS= read -r line || [[ -n $line ]]; do
+		number=$((number + 1))
+		line=${line%$'\r'}
+		if [[ $line =~ ^[[:space:]]*(#.*)?$ ]]; then
+			continue
+		fi
+		[[ $line =~ $pattern ]] || die "$USER_SETTINGS line $number: expected NAME=value"
+		key=${BASH_REMATCH[1]}
+		value=${BASH_REMATCH[2]}
+		value=${value%"${value##*[![:space:]]}"}
+		case $key in
+		HOST) NEW_HOST=$value ;;
+		PORT) NEW_PORT=$value ;;
+		PROTO) NEW_PROTO=$value ;;
+		DNS) NEW_DNS=$value ;;
+		*) die "$USER_SETTINGS line $number: unknown setting $key" ;;
+		esac
+	done <"$USER_SETTINGS"
+
+	is_valid_host "$NEW_HOST" || die "HOST must be an IPv4 address or hostname: $NEW_HOST"
+	is_valid_port "$NEW_PORT" || die "PORT must be 1-65535: $NEW_PORT"
+	NEW_PORT=$((10#$NEW_PORT))
+	[[ $NEW_PROTO == udp || $NEW_PROTO == tcp ]] || die "PROTO must be udp or tcp: $NEW_PROTO"
+	NEW_DNS=$(valid_dns_list "$NEW_DNS" DNS) || exit 1
 }
 
 default_interface() {
@@ -361,6 +428,8 @@ default_interface() {
 	printf '%s' "$nic"
 }
 
+is_valid_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+
 port_in_use() {
 	local proto=$1 port=$2 flag=-lnt
 	[[ $proto == udp ]] && flag=-lnu
@@ -370,7 +439,7 @@ port_in_use() {
 choose_port() {
 	local proto=$1 port
 	if [[ -n ${VPN_PORT:-} ]]; then
-		[[ $VPN_PORT =~ ^[0-9]+$ ]] && ((VPN_PORT >= 1 && VPN_PORT <= 65535)) || die "VPN_PORT must be 1-65535"
+		is_valid_port "$VPN_PORT" || die "VPN_PORT must be 1-65535"
 		port_in_use "$proto" "$VPN_PORT" && die "port $VPN_PORT/$proto is already in use"
 		printf '%s' "$VPN_PORT"
 		return 0
@@ -405,10 +474,12 @@ choose_subnet() {
 	die "every candidate VPN subnet overlaps an existing network"
 }
 
+is_valid_host() { [[ $1 =~ ^[A-Za-z0-9.-]+$ ]]; }
+
 choose_host() {
 	local host
 	if [[ -n ${VPN_HOST:-} ]]; then
-		[[ $VPN_HOST =~ ^[A-Za-z0-9.-]+$ ]] || die "VPN_HOST must be an IPv4 address or hostname"
+		is_valid_host "$VPN_HOST" || die "VPN_HOST must be an IPv4 address or hostname"
 		printf '%s' "$VPN_HOST"
 	elif host=$(detect_public_ip); then
 		printf '%s' "$host"
@@ -431,13 +502,19 @@ detect_public_ip() {
 	return 1
 }
 
-choose_dns() {
-	local servers server
-	servers=$(printf '%s' "${VPN_DNS:-1.1.1.1 9.9.9.9}" | tr ',' ' ')
+choose_dns() { valid_dns_list "${VPN_DNS:-1.1.1.1 9.9.9.9}" VPN_DNS; }
+
+# Prints the servers separated by single spaces, or stops if any is invalid.
+valid_dns_list() {
+	local servers=${1//,/ } label=$2 server clean=""
+	set -f
 	for server in $servers; do
-		is_ipv4 "$server" || die "VPN_DNS has an invalid IPv4 address: $server"
+		is_ipv4 "$server" || die "$label has an invalid IPv4 address: $server"
+		clean+=" $server"
 	done
-	printf '%s' "$servers"
+	set +f
+	[[ -n $clean ]] || die "$label needs at least one server"
+	printf '%s' "${clean# }"
 }
 
 has_ipv6_egress() {
@@ -571,9 +648,11 @@ EOF
 	chmod 600 "$OVPN_DIR/server.conf"
 }
 
+# UDP has no connection to close, so each side says when it is leaving. Without
+# this, a client that left still counts as connected until a timeout minutes later.
 exit_notify_config() {
 	if [[ $PROTO == udp ]]; then
-		printf 'explicit-exit-notify 1'
+		printf 'explicit-exit-notify 1\npush "explicit-exit-notify 1"'
 	fi
 }
 
@@ -666,6 +745,19 @@ open_firewall() {
 	firewall_up
 	if selinux_uses_custom_port; then
 		selinux_label_port
+	fi
+}
+
+# Undoes the rules tied to the current port that outlive the service.
+close_firewall_port() {
+	if firewalld_running; then
+		firewalld_rules remove
+	fi
+	if has ufw; then
+		ufw delete allow "$PORT/$PROTO" >/dev/null 2>&1 || true
+	fi
+	if selinux_uses_custom_port; then
+		selinux_unlabel_port
 	fi
 }
 
@@ -868,7 +960,7 @@ Type=$type
 RuntimeDirectory=openvpn-server
 WorkingDirectory=$OVPN_DIR
 ExecStartPre=+$BIN firewall-up
-ExecStart=$(command -v openvpn) --suppress-timestamps --status $STATUS_FILE 10 --status-version 2 --config server.conf
+ExecStart=$(command -v openvpn) --suppress-timestamps --status $STATUS_FILE $STATUS_SECONDS --status-version 2 --config server.conf
 ExecStopPost=+$BIN firewall-down
 Restart=on-failure
 RestartSec=5
@@ -892,7 +984,7 @@ write_openrc_script() {
 #!/sbin/openrc-run
 description="ur-vpn OpenVPN server"
 command="$(command -v openvpn)"
-command_args="--cd $OVPN_DIR --config server.conf --status $STATUS_FILE 10 --status-version 2 --log-append /var/log/ur-vpn.log"
+command_args="--cd $OVPN_DIR --config server.conf --status $STATUS_FILE $STATUS_SECONDS --status-version 2 --log-append /var/log/ur-vpn.log"
 command_background=yes
 pidfile="/run/$SERVICE.pid"
 depend() { need net; after firewall; }
@@ -1072,6 +1164,8 @@ ${BOLD}Manage it later on this server:${RESET}
   ur-vpn show NAME     show a client's paste block again (--raw for .ovpn text)
   ur-vpn app NAME      save an .ovpn file for the OpenVPN Connect app
   ur-vpn revoke NAME   cut off a client
+  ur-vpn edit          change the settings, and apply them when you save
+  ur-vpn top           watch clients, traffic and health live
   ur-vpn list | status | logs | uninstall
 
 ${BOLD}Step 2:${RESET}
@@ -1241,6 +1335,313 @@ cmd_logs() {
 	show_service_log "${1:-40}"
 }
 
+# --- Changing settings --------------------------------------------------------
+
+cmd_edit() {
+	load_settings
+	write_user_settings
+	local editor=${VISUAL:-${EDITOR:-}} candidate
+	if [[ -z $editor ]]; then
+		for candidate in nano vim vi; do
+			if has "$candidate"; then
+				editor=$candidate
+				break
+			fi
+		done
+	fi
+	[[ -n $editor ]] || die "no editor found. Change $USER_SETTINGS yourself, then run: ur-vpn apply"
+	# shellcheck disable=SC2086 # an editor may be several words, like "code --wait"
+	$editor "$USER_SETTINGS" || die "the editor reported an error, so nothing was applied"
+	cmd_apply
+}
+
+cmd_apply() {
+	load_settings
+	write_user_settings
+	read_user_settings
+
+	local old_host=$HOST old_port=$PORT old_proto=$PROTO old_dns=$DNS_SERVERS was_running=no
+	if [[ "$NEW_HOST $NEW_PORT $NEW_PROTO $NEW_DNS" == "$HOST $PORT $PROTO $DNS_SERVERS" ]]; then
+		printf 'No changes to apply.\n'
+		return 0
+	fi
+	if [[ "$NEW_PORT/$NEW_PROTO" != "$PORT/$PROTO" ]] && port_in_use "$NEW_PROTO" "$NEW_PORT"; then
+		die "port $NEW_PORT/$NEW_PROTO is already in use. Nothing was changed."
+	fi
+	if service_is_active; then
+		was_running=yes
+	fi
+
+	use_settings "$NEW_HOST" "$NEW_PORT" "$NEW_PROTO" "$NEW_DNS"
+	if [[ $was_running == no ]]; then
+		firewall_down
+		printf 'Saved. The VPN is stopped, so it uses these settings at: ur-vpn start\n'
+	elif restart_service && wait_until 10 server_is_up; then
+		printf 'Applied. The VPN restarted with the new settings.\n'
+	else
+		show_service_log 15 >&2 || true
+		use_settings "$old_host" "$old_port" "$old_proto" "$old_dns"
+		restart_service || true
+		die "the VPN did not start with the new settings, so it went back to the old ones. Your edits are still in $USER_SETTINGS."
+	fi
+	print_apply_advice "$old_host $old_port $old_proto" "$old_dns"
+}
+
+use_settings() {
+	close_firewall_port
+	HOST=$1 PORT=$2 PROTO=$3 DNS_SERVERS=$4
+	save_settings
+	write_server_config
+	open_firewall
+	rebuild_profiles
+}
+
+rebuild_profiles() {
+	local profile
+	for profile in "$CLIENTS_DIR"/*.ovpn; do
+		if [[ -f $profile ]]; then
+			build_profile "$(basename "$profile" .ovpn)"
+		fi
+	done
+}
+
+print_apply_advice() {
+	local old_endpoint=$1 old_dns=$2
+	if [[ "$HOST $PORT $PROTO" != "$old_endpoint" ]]; then
+		cat <<EOF
+
+${BOLD}Set up every device again${RESET}, because they still look for the old address or port.
+Get a device's new block with: ur-vpn show NAME
+Get an app's new file with:    ur-vpn app NAME
+EOF
+		if [[ "$PORT $PROTO" != "${old_endpoint#* }" ]]; then
+			printf '\nAlso allow the new port in your provider'"'"'s firewall, if it has one.\n  %s\n' "$(provider_firewall_hint)"
+		fi
+	elif [[ $DNS_SERVERS != "$old_dns" ]]; then
+		printf 'Apps use the new DNS after they reconnect. Devices set up with the script keep the old DNS until you set them up again.\n'
+	fi
+}
+
+# --- The live view ------------------------------------------------------------
+
+readonly AWK_FORMAT='
+function human(n, units, i) {
+	split("B KB MB GB TB", units, " ")
+	n += 0
+	i = 1
+	while (n >= 1024 && i < 5) { n /= 1024; i++ }
+	return sprintf(i == 1 ? "%d %s" : "%.1f %s", n, units[i])
+}
+function duration(s) {
+	if (s >= 86400) return sprintf("%dd %dh", s / 86400, (s % 86400) / 3600)
+	if (s >= 3600) return sprintf("%dh %dm", s / 3600, (s % 3600) / 60)
+	if (s >= 60) return sprintf("%dm %ds", s / 60, s % 60)
+	return sprintf("%ds", s)
+}'
+
+TOP_RX=0 TOP_TX=0 TOP_AT=0 TOP_RX_RATE=0 TOP_TX_RATE=0
+TOP_STATUS_TIME="" TOP_CLIENTS="" TOP_ROWS="" TOP_ACTIVITY="" TOP_TICKS=0
+
+top_sample() {
+	top_sample_tunnel
+	top_sample_clients
+	if ((TOP_TICKS % 3 == 0)); then
+		TOP_ACTIVITY=$(top_activity)
+	fi
+	TOP_TICKS=$((TOP_TICKS + 1))
+}
+
+# The tunnel's counters update instantly, unlike the status file. Clients' uploads
+# arrive on it, and their downloads leave on it.
+top_sample_tunnel() {
+	local stats=/sys/class/net/$TUN_DEV/statistics rx=0 tx=0 now
+	now=$(date +%s)
+	if [[ -r $stats/rx_bytes ]]; then
+		rx=$(<"$stats/rx_bytes")
+		tx=$(<"$stats/tx_bytes")
+	fi
+	if ((TOP_AT > 0 && now > TOP_AT && rx >= TOP_RX && tx >= TOP_TX)); then
+		TOP_RX_RATE=$(((rx - TOP_RX) / (now - TOP_AT)))
+		TOP_TX_RATE=$(((tx - TOP_TX) / (now - TOP_AT)))
+	fi
+	TOP_RX=$rx TOP_TX=$tx TOP_AT=$now
+}
+
+top_sample_clients() {
+	local time="" clients
+	if [[ -r $STATUS_FILE ]]; then
+		time=$(awk -F, '$1 == "TIME" { print $NF; exit }' "$STATUS_FILE")
+	fi
+	if [[ -z $time ]]; then
+		TOP_CLIENTS="" TOP_ROWS="" TOP_STATUS_TIME=""
+		return 0
+	fi
+	[[ $time != "$TOP_STATUS_TIME" ]] || return 0
+	clients=$(top_read_clients)
+	TOP_ROWS=$(top_client_rows "$clients" "$((time - ${TOP_STATUS_TIME:-$time}))")
+	TOP_CLIENTS=$clients TOP_STATUS_TIME=$time
+}
+
+# name, address, VPN IP, bytes to it, bytes from it, connected since. Columns come
+# from the file's own header, because OpenVPN versions differ.
+top_read_clients() {
+	awk -F, '
+		$1 == "HEADER" && $2 == "CLIENT_LIST" {
+			for (i = 3; i <= NF; i++) column[$i] = i - 1
+			next
+		}
+		$1 == "CLIENT_LIST" && $2 != "UNDEF" {
+			address = $(column["Real Address"])
+			sub(/:[0-9]+$/, "", address)
+			printf "%s\t%s\t%s\t%s\t%s\t%s\n", $2, address, $(column["Virtual Address"]),
+				$(column["Bytes Sent"]), $(column["Bytes Received"]), $(column["Connected Since (time_t)"])
+		}' "$STATUS_FILE"
+}
+
+top_client_rows() {
+	[[ -n $1 ]] || return 0
+	PREVIOUS=$TOP_CLIENTS NOW=$(date +%s) ELAPSED=$2 awk -F'\t' "$AWK_FORMAT"'
+		BEGIN {
+			count = split(ENVIRON["PREVIOUS"], lines, "\n")
+			for (i = 1; i <= count; i++) {
+				split(lines[i], old, "\t")
+				down[old[1]] = old[4] + 0
+				up[old[1]] = old[5] + 0
+			}
+			elapsed = ENVIRON["ELAPSED"] + 0
+		}
+		{
+			down_rate = up_rate = 0
+			if (elapsed > 0 && ($1 in down)) {
+				if ($4 + 0 >= down[$1]) down_rate = ($4 - down[$1]) / elapsed
+				if ($5 + 0 >= up[$1]) up_rate = ($5 - up[$1]) / elapsed
+			}
+			printf "%-16.16s %-16.16s %-14.14s %10s %10s %10s  %s\n", $1, $2, $3,
+				human(down_rate), human(up_rate), human($4 + $5), duration(ENVIRON["NOW"] - $6)
+		}' <<<"$1"
+}
+
+# The latest logins, disconnects and refused connections, newest first. Only the
+# parts matched below are shown, so nothing a stranger sends reaches the terminal.
+top_activity() {
+	{ show_service_log 2000 2>/dev/null || true; } | awk '
+		!match($0, /[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) { next }
+		{ time = substr($0, RSTART, 8); event = "" }
+		/Peer Connection Initiated with/ && match($0, /\[[A-Za-z0-9_-]+\] Peer Connection/) {
+			name = substr($0, RSTART + 1)
+			sub(/\].*/, "", name)
+			from = $0
+			sub(/.*Peer Connection Initiated with \[[^]]*\]/, "", from)
+			sub(/^::ffff:/, "", from)
+			sub(/:[0-9]+.*$/, "", from)
+			event = name " connected from " from
+		}
+		/CC-EEN exit message|client-instance (exiting|restarting)/ && match($0, /[A-Za-z0-9_-]+\/[0-9a-fA-F:.]+ /) {
+			session = substr($0, RSTART, RLENGTH)
+			if (!(session in gone)) {
+				gone[session] = 1
+				name = session
+				sub(/\/.*/, "", name)
+				event = name " disconnected"
+			}
+		}
+		/certificate revoked/ && match($0, /CN=[A-Za-z0-9_-]+/) {
+			event = "refused revoked client " substr($0, RSTART + 3, RLENGTH - 3)
+		}
+		event != "" { lines[++count] = time "  " event }
+		END { for (i = count; i > 0 && i > count - 8; i--) print lines[i] }'
+}
+
+top_health() {
+	service_is_active || {
+		printf '%sstopped%s  Start it with: ur-vpn start' "$RED" "$RESET"
+		return 0
+	}
+	if ! ip link show "$TUN_DEV" >/dev/null 2>&1; then
+		printf '%sproblem%s  the tunnel device %s is missing' "$RED" "$RESET" "$TUN_DEV"
+	elif ! port_in_use "$PROTO" "$PORT"; then
+		printf '%sproblem%s  nothing is listening on %s/%s' "$RED" "$RESET" "$PORT" "$PROTO"
+	elif [[ $(cat /proc/sys/net/ipv4/ip_forward) != 1 ]]; then
+		printf '%sproblem%s  IP forwarding is off' "$RED" "$RESET"
+	else
+		printf '%sgood%s' "$GREEN" "$RESET"
+	fi
+}
+
+top_machine() {
+	awk "$AWK_FORMAT"'
+		FILENAME ~ /loadavg/ { load = $1 }
+		FILENAME ~ /meminfo/ && $1 == "MemTotal:" { total = $2 }
+		FILENAME ~ /meminfo/ && $1 == "MemAvailable:" { free = $2 }
+		FILENAME ~ /uptime/ { up = $1 }
+		END {
+			printf("load %s   memory %d%%   up %s", load, (total > 0 ? (total - free) * 100 / total : 0), duration(up))
+		}' /proc/loadavg /proc/meminfo /proc/uptime
+}
+
+top_frame() {
+	local connected=0 total=0 profile
+	for profile in "$CLIENTS_DIR"/*.ovpn; do
+		if [[ -f $profile ]]; then
+			total=$((total + 1))
+		fi
+	done
+	if [[ -n $TOP_ROWS ]]; then
+		connected=$(wc -l <<<"$TOP_ROWS")
+	fi
+
+	printf '%sur-vpn top%s  %s   %s   press q to quit\n\n' "$BOLD" "$RESET" "$UR_VPN_VERSION" "$(date +%H:%M:%S)"
+	printf 'Health    %s\n' "$(top_health)"
+	printf 'Endpoint  %s:%s/%s\n' "$HOST" "$PORT" "$PROTO"
+	RX=$TOP_RX TX=$TOP_TX RX_RATE=$TOP_RX_RATE TX_RATE=$TOP_TX_RATE awk "$AWK_FORMAT"'
+		BEGIN {
+			printf "Speed     down %-12s up %s\n", human(ENVIRON["TX_RATE"]) "/s", human(ENVIRON["RX_RATE"]) "/s"
+			printf "Total     down %-12s up %s\n", human(ENVIRON["TX"]), human(ENVIRON["RX"])
+		}'
+	printf 'Clients   %s connected of %s\n' "$connected" "$total"
+	printf 'Server    %s\n\n' "$(top_machine)"
+
+	printf '%s%-16s %-16s %-14s %10s %10s %10s  %s%s\n' "$BOLD" NAME FROM 'VPN IP' DOWN/s UP/s TOTAL TIME "$RESET"
+	if [[ -n $TOP_ROWS ]]; then
+		printf '%s\n' "$TOP_ROWS"
+	else
+		printf 'nobody connected\n'
+	fi
+
+	printf '\n%sACTIVITY%s\n' "$BOLD" "$RESET"
+	if [[ -n $TOP_ACTIVITY ]]; then
+		printf '%s\n' "$TOP_ACTIVITY"
+	else
+		printf 'nothing yet\n'
+	fi
+}
+
+cmd_top() {
+	load_settings
+	top_sample
+	if [[ ${1:-} == --once || ! -t 0 || ! -t 1 ]]; then
+		sleep 1
+		top_sample
+		top_frame
+		return 0
+	fi
+
+	trap 'printf "\033[?7h\033[?25h\033[?1049l"; remove_temp_files' EXIT
+	trap 'exit 0' INT TERM
+	printf '\033[?1049h\033[?25l\033[?7l' # own screen, no cursor, no line wrapping
+	local key="" rows
+	while [[ $key != [qQ] ]]; do
+		rows=$(stty size 2>/dev/null | cut -d' ' -f1) || true
+		if [[ ${rows:-0} -le 0 ]]; then
+			rows=24
+		fi
+		printf '\033[2J\033[H%s' "$(top_frame | awk -v rows="$rows" 'NR <= rows')"
+		key=""
+		read -rsn1 -t 1 key || true
+		top_sample
+	done
+}
+
 cmd_update() {
 	[[ -f $INSTALLED_MARK ]] || die "ur-vpn is not installed on this machine"
 	UPDATE_DIR=$(mktemp -d)
@@ -1297,6 +1698,7 @@ replace_command() {
 # Connected clients are only disturbed if one of them really changed.
 cmd_apply_update() {
 	load_settings
+	write_user_settings
 	local before
 	before=$(installed_config | cksum)
 	write_server_config
@@ -1330,15 +1732,7 @@ cmd_uninstall() {
 	step "Removing ur-vpn"
 	remove_service
 	firewall_down
-	if firewalld_running; then
-		firewalld_rules remove
-	fi
-	if has ufw; then
-		ufw delete allow "$PORT/$PROTO" >/dev/null 2>&1 || true
-	fi
-	if selinux_uses_custom_port; then
-		selinux_unlabel_port
-	fi
+	close_firewall_port
 	rm -f "$SYSCTL_FILE" "$BIN"
 	rm -rf "$OVPN_DIR" "$STATE_DIR"
 	printf 'Removed. The openvpn package is still installed; IP forwarding stays on until the next reboot.\n'
@@ -1358,6 +1752,9 @@ ur-vpn: OpenVPN server manager
   ur-vpn stop             stop the VPN, and keep it off
   ur-vpn restart          restart the VPN
   ur-vpn status           service state and connected clients
+  ur-vpn top [--once]     live clients, traffic and health  (q to quit)
+  ur-vpn edit             change the settings, and apply them when you save
+  ur-vpn apply            apply $USER_SETTINGS after changing it yourself
   ur-vpn logs [LINES]     recent server log
   ur-vpn update           move to the latest release
   ur-vpn version          print the installed version
@@ -1395,6 +1792,9 @@ main() {
 	stop) cmd_stop ;;
 	restart) cmd_restart ;;
 	status) cmd_status ;;
+	top) cmd_top "$@" ;;
+	edit) cmd_edit ;;
+	apply) cmd_apply ;;
 	logs) cmd_logs "$@" ;;
 	update) cmd_update ;;
 	apply-update) cmd_apply_update ;;

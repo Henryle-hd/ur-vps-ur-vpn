@@ -48,6 +48,7 @@ SAVED_TERMINAL="" # stty state to restore if interrupted during the paste
 SUDO_KEEPALIVE=""
 CONNECT_STARTED=""
 UPDATE_DIR=""
+TOP_DIR=""
 
 # --- Output -------------------------------------------------------------------
 
@@ -101,6 +102,9 @@ cleanup() {
 	if [[ -n $UPDATE_DIR ]]; then
 		rm -rf "$UPDATE_DIR"
 	fi
+	if [[ -n $TOP_DIR ]]; then
+		rm -rf "$TOP_DIR"
+	fi
 	if [[ -n $SUDO_KEEPALIVE ]]; then
 		kill "$SUDO_KEEPALIVE" 2>/dev/null || true
 	fi
@@ -123,6 +127,7 @@ cmd_setup() {
   ur-vpn stop     disconnect
   ur-vpn start    reconnect
   ur-vpn status   check the connection
+  ur-vpn top      watch health and speed live
   ur-vpn remove   remove the VPN from this device
 EOF
 }
@@ -437,6 +442,15 @@ linux_connected() {
 }
 
 linux_is_up() { systemctl is-active --quiet "$LINUX_SERVICE" && linux_tunnel_exists; }
+
+# Bytes received and sent by the tunnel. Prints nothing unless it is up.
+linux_tunnel_bytes() {
+	local stats=/sys/class/net/$LINUX_TUN/statistics
+	linux_is_up || return 0
+	printf '%s %s\n' "$(cat "$stats/rx_bytes")" "$(cat "$stats/tx_bytes")"
+}
+
+linux_ping_ms() { ping -n -c 1 -W 2 "$1" 2>/dev/null; }
 linux_logs() { $SUDO journalctl -u "$LINUX_SERVICE" --no-pager -n "${1:-30}" 2>/dev/null || true; }
 linux_on() { $SUDO systemctl enable --now --no-block "$LINUX_SERVICE" >/dev/null 2>&1; }
 linux_off() { $SUDO systemctl disable --now "$LINUX_SERVICE" >/dev/null 2>&1 || true; }
@@ -599,6 +613,19 @@ mac_is_up() { $SUDO launchctl print "system/$MAC_LABEL" >/dev/null 2>&1 && mac_c
 mac_logs() { $SUDO tail -n "${1:-30}" "$MAC_LOG" 2>/dev/null || true; }
 mac_off() { $SUDO launchctl bootout "system/$MAC_LABEL" 2>/dev/null || true; }
 
+# Bytes received and sent by the tunnel. Prints nothing unless it is up. The last
+# four netstat columns are stable: a tunnel leaves the Address column empty.
+mac_tunnel_bytes() {
+	local tunnel
+	launchctl print "system/$MAC_LABEL" >/dev/null 2>&1 || return 0
+	tunnel=$(route -n get 1.1.1.1 2>/dev/null | awk '$1 == "interface:" { print $2 }') || true
+	case $tunnel in
+	utun*) netstat -ibn -I "$tunnel" 2>/dev/null | awk '/<Link#/ { print $(NF - 4), $(NF - 1); exit }' ;;
+	esac
+}
+
+mac_ping_ms() { ping -n -c 1 -t 2 "$1" 2>/dev/null; }
+
 mac_on() {
 	mac_off
 	$SUDO launchctl bootstrap system "$MAC_PLIST"
@@ -689,6 +716,197 @@ cmd_status() {
 	printf 'Public IP: %s\n' "$(public_ip 8 || printf unknown)"
 }
 
+# --- The live view ------------------------------------------------------------
+
+readonly TOP_PING_TARGET=1.1.1.1
+readonly TOP_IP_EVERY=30
+
+readonly AWK_HUMAN='
+function human(n, units, i) {
+	split("B KB MB GB TB", units, " ")
+	n += 0
+	i = 1
+	while (n >= 1024 && i < 5) { n /= 1024; i++ }
+	return sprintf(i == 1 ? "%d %s" : "%.1f %s", n, units[i])
+}'
+
+TOP_RX="" TOP_TX="" TOP_AT=0 TOP_RX_RATE=0 TOP_TX_RATE=0 TOP_TICKS=0
+TOP_LATENCY="" TOP_SENT=0 TOP_LOST=0 TOP_MISSES=0 TOP_PUBLIC_IP="" TOP_SERVER=""
+
+# Reads what the root-only profile says about the server, without asking for a
+# password. Without sudo already cached, the view simply leaves this line out.
+top_read_server() {
+	local conf=$LINUX_CONF reader=cat
+	if [[ $PLATFORM == mac ]]; then
+		conf=$MAC_CONF
+	fi
+	if [[ -n $SUDO ]]; then
+		reader="sudo -n cat"
+	fi
+	$reader "$conf" 2>/dev/null |
+		awk '$1 == "proto" { proto = $2 } $1 == "remote" { host = $2; port = $3 } END { if (host != "") print host ":" port "/" proto }' || true
+}
+
+top_sample_tunnel() {
+	local bytes rx tx now
+	bytes=$(call_platform tunnel_bytes) || true
+	now=$(date +%s)
+	if [[ -z $bytes ]]; then
+		TOP_RX="" TOP_TX="" TOP_RX_RATE=0 TOP_TX_RATE=0
+		return 0
+	fi
+	rx=${bytes%% *}
+	tx=${bytes##* }
+	if [[ -n $TOP_RX ]] && ((now > TOP_AT && rx >= TOP_RX && tx >= TOP_TX)); then
+		TOP_RX_RATE=$(((rx - TOP_RX) / (now - TOP_AT)))
+		TOP_TX_RATE=$(((tx - TOP_TX) / (now - TOP_AT)))
+	fi
+	TOP_RX=$rx TOP_TX=$tx TOP_AT=$now
+}
+
+# Prints the round trip in ms, or nothing if there was no reply. An outside address
+# tests the whole path, through the server and out to the internet.
+top_ping() {
+	call_platform ping_ms "$TOP_PING_TARGET" | sed -n 's/.*time[=<]\([0-9.]*\).*/\1/p' | head -n 1
+}
+
+# These two run in the background so a slow network never freezes the screen. Each
+# writes to its own file, which top_collect picks up on a later tick.
+top_start_ping() {
+	if has ping; then
+		(top_ping >"$TOP_DIR/ping.new" 2>/dev/null; mv -f "$TOP_DIR/ping.new" "$TOP_DIR/ping" 2>/dev/null) &
+	fi
+}
+
+top_start_ip_check() {
+	(public_ip 5 >"$TOP_DIR/ip.new" 2>/dev/null; mv -f "$TOP_DIR/ip.new" "$TOP_DIR/ip" 2>/dev/null) &
+}
+
+top_collect() {
+	if [[ -f $TOP_DIR/ping ]]; then
+		top_record_ping "$(cat "$TOP_DIR/ping")"
+		rm -f "$TOP_DIR/ping"
+		top_start_ping
+	fi
+	if [[ -f $TOP_DIR/ip ]]; then
+		TOP_PUBLIC_IP=$(cat "$TOP_DIR/ip")
+		rm -f "$TOP_DIR/ip"
+	fi
+	if ((TOP_TICKS % TOP_IP_EVERY == 0)); then
+		top_start_ip_check
+	fi
+	TOP_TICKS=$((TOP_TICKS + 1))
+}
+
+# Halving keeps the loss figure about the last minute, not the whole session.
+top_record_ping() {
+	TOP_LATENCY=$1
+	TOP_SENT=$((TOP_SENT + 1))
+	if [[ -z $1 ]]; then
+		TOP_LOST=$((TOP_LOST + 1))
+		TOP_MISSES=$((TOP_MISSES + 1))
+	else
+		TOP_MISSES=0
+	fi
+	if ((TOP_SENT >= 40)); then
+		TOP_SENT=$((TOP_SENT / 2)) TOP_LOST=$((TOP_LOST / 2))
+	fi
+}
+
+top_loss_percent() {
+	if ((TOP_SENT > 0)); then
+		printf '%s' $((TOP_LOST * 100 / TOP_SENT))
+	else
+		printf 0
+	fi
+}
+
+# Networks drop the odd packet, so one lost ping means nothing: it takes several
+# in a row to say the internet is gone, and a few pings to judge the loss.
+top_health() {
+	local latency=${TOP_LATENCY%%.*}
+	if [[ -z $TOP_RX ]]; then
+		printf '%snot connected%s  Connect with: ur-vpn start' "$RED" "$RESET"
+	elif ! has ping; then
+		printf '%sconnected%s' "$GREEN" "$RESET"
+	elif ((TOP_SENT == 0)); then
+		printf '%schecking%s' "$YELLOW" "$RESET"
+	elif ((TOP_MISSES >= 3)); then
+		printf '%sno internet%s  the VPN is up, but pings through it get no reply' "$RED" "$RESET"
+	elif ((${latency:-0} >= 300 || (TOP_SENT >= 5 && $(top_loss_percent) >= 10))); then
+		printf '%sslow%s' "$YELLOW" "$RESET"
+	else
+		printf '%sgood%s' "$GREEN" "$RESET"
+	fi
+}
+
+top_frame() {
+	printf '%sur-vpn top%s  %s   %s   press q to quit\n\n' "$BOLD" "$RESET" "$UR_VPN_VERSION" "$(date +%H:%M:%S)"
+	printf 'Health     %s\n' "$(top_health)"
+	if [[ -z $TOP_RX ]]; then
+		return 0
+	fi
+	printf 'VPN        connected\n'
+	if [[ -n $TOP_SERVER ]]; then
+		printf 'Server     %s\n' "$TOP_SERVER"
+	fi
+	printf 'Public IP  %s\n' "${TOP_PUBLIC_IP:-checking}"
+	if ! has ping; then
+		printf 'Latency    needs the ping command\n'
+	elif [[ -n $TOP_LATENCY ]]; then
+		printf 'Latency    %s ms   loss %s%%\n' "$TOP_LATENCY" "$(top_loss_percent)"
+	else
+		printf 'Latency    no reply   loss %s%%\n' "$(top_loss_percent)"
+	fi
+	RX=$TOP_RX TX=$TOP_TX RX_RATE=$TOP_RX_RATE TX_RATE=$TOP_TX_RATE awk "$AWK_HUMAN"'
+		BEGIN {
+			printf "Speed      down %-12s up %s\n", human(ENVIRON["RX_RATE"]) "/s", human(ENVIRON["TX_RATE"]) "/s"
+			printf "Total      down %-12s up %s\n", human(ENVIRON["RX"]), human(ENVIRON["TX"])
+		}'
+}
+
+top_ping_until_reply() {
+	local _
+	has ping || return 0
+	for _ in 1 2 3; do
+		top_record_ping "$(top_ping)"
+		if [[ -n $TOP_LATENCY ]]; then
+			return 0
+		fi
+	done
+}
+
+cmd_top() {
+	TOP_DIR=$(mktemp -d)
+	TOP_SERVER=$(top_read_server)
+	top_sample_tunnel
+	if [[ ${1:-} == --once || ! -t 0 || ! -t 1 ]]; then
+		sleep 1
+		top_sample_tunnel
+		top_ping_until_reply
+		TOP_PUBLIC_IP=$(public_ip 5) || true
+		top_frame
+		return 0
+	fi
+
+	trap 'printf "\033[?7h\033[?25h\033[?1049l"; cleanup' EXIT
+	trap 'exit 0' INT TERM
+	printf '\033[?1049h\033[?25l\033[?7l' # own screen, no cursor, no line wrapping
+	top_start_ping
+	local key="" rows
+	while [[ $key != [qQ] ]]; do
+		top_collect
+		rows=$(stty size 2>/dev/null | cut -d' ' -f1) || true
+		if [[ ${rows:-0} -le 0 ]]; then
+			rows=24
+		fi
+		printf '\033[2J\033[H%s' "$(top_frame | awk -v rows="$rows" 'NR <= rows')"
+		key=""
+		read -rsn1 -t 1 key || true
+		top_sample_tunnel
+	done
+}
+
 # Only the command changes: the VPN stays as it is, connected or off.
 cmd_update() {
 	[[ -f $BIN ]] || die "ur-vpn is not installed on this device"
@@ -730,6 +948,7 @@ ur-vpn client
   ur-vpn stop        disconnect, and stay off    (or: off)
   ur-vpn restart     reconnect
   ur-vpn status      show the connection state
+  ur-vpn top         live health, latency and speed  (q to quit, --once to print once)
   ur-vpn logs [N]    show recent log lines
   ur-vpn update      move to the latest release
   ur-vpn version     print the installed version
@@ -755,6 +974,7 @@ main() {
 	stop | off) cmd_off ;;
 	restart) cmd_restart ;;
 	status) cmd_status ;;
+	top) cmd_top "${2:-}" ;;
 	logs) call_platform logs "${2:-30}" ;;
 	update) cmd_update ;;
 	version) printf '%s\n' "$UR_VPN_VERSION" ;;
