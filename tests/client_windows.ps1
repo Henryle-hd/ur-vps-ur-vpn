@@ -99,6 +99,19 @@ Refuses 'rejects a tampered release' { Get-ReleaseVersion $tampered.File $tamper
 Refuses 'rejects a release that does not parse' { Get-ReleaseVersion $broken.File $broken.Sums }
 Refuses 'rejects a release with no version' { Get-ReleaseVersion $unstamped.File $unstamped.Sums }
 
+# --- The live view ------------------------------------------------------------
+
+Expect 'formats bytes' { (Format-Bytes 512) -ceq '512 B' }
+Expect 'formats megabytes' { (Format-Bytes (5 * 1024 * 1024)) -ceq '5.0 MB' }
+Expect 'health: not connected' { (Get-VpnHealth $false $null 0 0 0) -ceq 'not connected' }
+Expect 'health: checking' { (Get-VpnHealth $true $null 0 0 0) -ceq 'checking' }
+Expect 'health: good' { (Get-VpnHealth $true 30 5 0 0) -ceq 'good' }
+Expect 'health: slow on latency' { (Get-VpnHealth $true 400 5 0 0) -ceq 'slow' }
+Expect 'health: slow on packet loss' { (Get-VpnHealth $true 30 10 2 0) -ceq 'slow' }
+Expect 'health: one lost ping is not an outage' { (Get-VpnHealth $true $null 1 1 1) -ceq 'good' }
+Expect 'health: no internet after several lost pings' { (Get-VpnHealth $true $null 5 3 3) -ceq 'no internet' }
+Expect 'top prints once without a VPN' { Show-Top $true; $true }
+
 # --- Installing, on a throwaway machine ---------------------------------------
 
 if ($Install) {

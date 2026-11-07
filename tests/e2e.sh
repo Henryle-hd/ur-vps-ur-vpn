@@ -26,6 +26,7 @@ readonly SERVER=urvpn-srv
 readonly CLIENT=urvpn-cli
 readonly MIN_FREE_MB=${MIN_FREE_MB:-600}
 readonly SERVER_STATUS=/run/openvpn-server/status-ur-vpn.log
+readonly USER_CONF=/etc/ur-vpn/ur-vpn.conf
 
 passed=0
 failed=0
@@ -222,7 +223,7 @@ publish_release() {
 
 server_pid() { on_server 'systemctl show -p MainPID --value ur-vpn-server'; }
 
-# Not every image has ping, so ask each end. The status file refreshes every 10s.
+# Not every image has ping, so ask each end. The status file refreshes every 2s.
 # 150s: a client that misses the server's goodbye waits out its 120s ping-restart.
 server_sees_client() {
 	on_server "for i in \$(seq 1 150); do grep -q '^CLIENT_LIST,client1,' $SERVER_STATUS && exit 0; sleep 1; done; exit 1"
@@ -306,6 +307,106 @@ test_service_commands() {
 	check "a restarted client connects" client_says_connected
 }
 
+test_top() {
+	on_server 'ur-vpn top --once' 2>&1 | sed 's/^/        /'
+	on_client 'ur-vpn top --once' 2>&1 | sed 's/^/        /'
+	check "server top shows the client" on_server 'ur-vpn top --once | grep -q "^client1 "'
+	check "server top says it is healthy" on_server 'ur-vpn top --once | grep -q "^Health *good"'
+	check "server top lists the login" on_server 'ur-vpn top --once | grep -q "client1 connected from"'
+	check "server top lists the disconnect" on_server 'ur-vpn top --once | grep -q "client1 disconnected"'
+	check "server live view closes on q" on_server '(sleep 3; printf q) | timeout 20 script -qec "ur-vpn top" /dev/null | grep -q "Endpoint"'
+
+	check "client top says connected" on_client 'ur-vpn top --once | grep -q "^VPN *connected"'
+	check "client top counts traffic" on_client 'curl -4 -fsS --max-time 15 https://api.ipify.org >/dev/null; ur-vpn top --once | grep -Eq "^Total +down [0-9.]+ [KMG]?B"'
+	check "client live view closes on q" on_client '(sleep 3; printf q) | timeout 20 script -qec "ur-vpn top" /dev/null | grep -q "Health"'
+}
+
+# Move the client to the server's current profile, the way a person sets it up again.
+client_follows_server() {
+	on_server 'ur-vpn show client1 --raw' | docker exec -i "$CLIENT" sh -c 'cat >/tmp/moved.ovpn'
+	on_client 'UR_VPN_RAW=file:///repo bash /repo/client.sh /tmp/moved.ovpn'
+}
+
+restore_settings() { on_server "cp /tmp/ur-vpn.conf.good $USER_CONF && ur-vpn apply"; }
+
+set_setting() { on_server "sed -i 's/^$1=.*/$1=$2/' $USER_CONF"; }
+
+# Each of these lines must stop apply before it touches anything.
+rejects_setting() {
+	check "apply rejects $1" on_server "cp /tmp/ur-vpn.conf.good $USER_CONF; printf '%s\n' '$2' >>$USER_CONF; ! ur-vpn apply"
+}
+
+test_settings() {
+	local port proto moved pid output
+	check "the settings file is private" on_server "[ \"\$(stat -c %a $USER_CONF)\" = 600 ]"
+	port=$(on_server "sed -n 's/^PORT=//p' $USER_CONF")
+	proto=$(on_server "sed -n 's/^PROTO=//p' $USER_CONF")
+	moved=$((port + 1))
+	on_server "cp $USER_CONF /tmp/ur-vpn.conf.good"
+
+	pid=$(server_pid)
+	check_output "apply says when nothing changed" "$(on_server 'ur-vpn apply' 2>&1)" "No changes"
+	rejects_setting "a port out of range" 'PORT=99999'
+	rejects_setting "an unknown protocol" 'PROTO=sctp'
+	rejects_setting "a bad DNS server" 'DNS=not-an-ip'
+	rejects_setting "an unknown setting" 'NOSUCH=1'
+	rejects_setting "a line that is not a setting" 'just some words'
+	rejects_setting "a command in a value" 'HOST=$(touch /tmp/ran-from-settings)'
+	check "a value never runs as a command" on_server '[ ! -e /tmp/ran-from-settings ]'
+	if [[ $(server_pid) == "$pid" ]]; then ok "rejected settings did not restart the VPN"; else bad "rejected settings restarted the VPN"; fi
+	on_server "cp /tmp/ur-vpn.conf.good $USER_CONF"
+
+	on_server 'mkdir -p /tmp/busy && printf "#!/bin/sh\necho UNCONN 0 0 0.0.0.0:7777 0.0.0.0:*\n" >/tmp/busy/ss && chmod +x /tmp/busy/ss'
+	on_server "printf 'PORT=7777\n' >>$USER_CONF"
+	check_output "apply refuses a port already in use" "$(on_server 'PATH=/tmp/busy:$PATH ur-vpn apply' 2>&1)" "already in use"
+	on_server "cp /tmp/ur-vpn.conf.good $USER_CONF"
+
+	set_setting DNS 8.8.8.8
+	check "apply changes the DNS" on_server 'ur-vpn apply'
+	check "the server pushes the new DNS" on_server 'grep -q "dhcp-option DNS 8.8.8.8" /etc/openvpn/server/ur-vpn/server.conf'
+	check "profiles get the new DNS" on_server 'ur-vpn show client1 --raw | grep -q "ur-vpn-dns: 8.8.8.8"'
+	check "the client reconnects by itself after a DNS change" server_sees_client
+	check "putting the settings back succeeds" restore_settings
+
+	on_server "EDITOR='sed -i s/^DNS=.*/DNS=8.8.4.4/' ur-vpn edit" >/dev/null 2>&1
+	check "edit applies the file when it is saved" on_server 'grep -q "dhcp-option DNS 8.8.4.4" /etc/openvpn/server/ur-vpn/server.conf'
+	restore_settings >/dev/null 2>&1
+
+	set_setting PORT "$moved"
+	output=$(on_server 'ur-vpn apply' 2>&1)
+	check_output "changing the port asks to set up devices again" "$output" "Set up every device again"
+	check "the server listens on the new port" on_server "ss -ln | grep -q ':$moved '"
+	check "the server left the old port" on_server "! ss -ln | grep -q ':$port '"
+	check "profiles get the new port" on_server "ur-vpn show client1 --raw | grep -Eq '^remote .* $moved\$'"
+	check "a device can move to the new port" client_follows_server
+	check "the client connects through the new port" server_sees_client
+	check "a moved client reaches the internet" on_client 'curl -4 -fsS --max-time 15 https://api.ipify.org'
+
+	on_server 'mkdir -p /tmp/shim && printf "#!/bin/sh\nexit 0\n" >/tmp/shim/ss && chmod +x /tmp/shim/ss'
+	set_setting PORT "$port"
+	output=$(on_server 'PATH=/tmp/shim:$PATH ur-vpn apply' 2>&1)
+	check_output "apply says so when the VPN will not come up" "$output" "went back to the old ones"
+	check "a failed apply goes back to the old port" on_server "grep -q '^port $moved\$' /etc/openvpn/server/ur-vpn/server.conf"
+	check "a failed apply leaves the VPN running" on_server 'systemctl is-active --quiet ur-vpn-server'
+	check "a failed apply keeps the old profiles" on_server "ur-vpn show client1 --raw | grep -Eq '^remote .* $moved\$'"
+
+	check "moving back to the first port succeeds" on_server 'ur-vpn apply'
+	check "a device can move back" client_follows_server
+	check "the client connects on the first port again" server_sees_client
+	check "the first port is the same protocol" on_server "ur-vpn show client1 --raw | grep -q '^proto $proto'"
+
+	check "apply on a stopped server only saves" on_server "ur-vpn stop && sed -i 's/^DNS=.*/DNS=8.8.8.8/' $USER_CONF && ur-vpn apply | grep -q Saved"
+	check "apply does not wake a stopped server" on_server '! systemctl is-active --quiet ur-vpn-server'
+	check "apply on a stopped server opens no firewall" on_server '
+		command -v iptables >/dev/null || exit 0
+		! iptables -w 5 -S 2>/dev/null | grep -q UR_VPN'
+	check "a saved setting is used at the next start" on_server 'ur-vpn start && grep -q "dhcp-option DNS 8.8.8.8" /etc/openvpn/server/ur-vpn/server.conf'
+	restore_settings >/dev/null 2>&1
+	check "the client is back after the settings tests" server_sees_client
+
+	check "update adds the settings file to an older install" on_server "rm $USER_CONF && ur-vpn apply-update && grep -q '^PORT=$port\$' $USER_CONF"
+}
+
 test_client_management() {
 	check "ur-vpn add creates a client" on_server 'ur-vpn add phone'
 	check "rejects unsafe client names" on_server '! ur-vpn add "../../evil"'
@@ -322,6 +423,7 @@ test_client_management() {
 	check "ur-vpn list shows it revoked" on_server 'ur-vpn list | grep -E "client1 +revoked"'
 	sleep 25
 	check "revoked client is refused" on_server "! grep -q '^CLIENT_LIST,client1,' $SERVER_STATUS"
+	check "server top lists the refused client" on_server 'ur-vpn top --once | grep -q "refused revoked client client1"'
 }
 
 test_removal() {
@@ -335,7 +437,7 @@ test_removal() {
 	check "no files left behind" on_server '[ ! -e /etc/ur-vpn ] && [ ! -e /etc/openvpn/server/ur-vpn ] && [ ! -e /usr/local/bin/ur-vpn ]'
 }
 
-readonly PHASES="test_server_install test_client_install test_tunnel test_rerun test_update test_service_commands test_client_management test_removal"
+readonly PHASES="test_server_install test_client_install test_tunnel test_rerun test_update test_service_commands test_top test_settings test_client_management test_removal"
 
 run_phases() {
 	local image=$1 phase

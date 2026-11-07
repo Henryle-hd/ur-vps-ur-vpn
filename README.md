@@ -20,7 +20,7 @@ cd ur-vps-ur-vpn
 sudo bash server.sh
 ```
 
-> **Check your provider's firewall.** The script opens the port on the server itself, but it can't change a firewall in your provider's web panel (AWS security groups, Oracle security lists, Google Cloud firewall rules, Azure NSGs and so on). If your provider has one, allow **UDP 1194** there. The script tells you where to find it for your provider.
+ > **Check your provider's firewall.** The script opens the port on the server itself, but it can't change a firewall in your provider's web panel (AWS security groups, Oracle security lists, Google Cloud firewall rules, Azure NSGs and so on). If your provider has one, allow **UDP 1194** there. The script tells you where to find it for your provider.
 
 ## Set up a device
 
@@ -66,6 +66,9 @@ On the server:
 | `sudo ur-vpn stop` | Stop the VPN, and keep it off, even after a reboot, until you start it |
 | `sudo ur-vpn restart` | Restart the VPN. Clients reconnect by themselves, usually within seconds |
 | `sudo ur-vpn status` | Show the service state and who is connected |
+| `sudo ur-vpn top` | Watch clients, logins, traffic and health live. Press `q` to quit |
+| `sudo ur-vpn edit` | Change the settings, and apply them when you save |
+| `sudo ur-vpn apply` | Apply `/etc/ur-vpn/ur-vpn.conf` after changing it yourself |
 | `sudo ur-vpn logs` | Show the recent log |
 | `sudo ur-vpn update` | Move to the latest release |
 | `sudo ur-vpn version` | Print the installed version |
@@ -76,7 +79,7 @@ Use one client per device. The block is a login, so treat it like a password. A 
 On macOS and Linux devices:
 
 ```text
-ur-vpn start | stop | restart | status | logs | update | version | remove
+ur-vpn start | stop | restart | status | top | logs | update | version | remove
 ```
 
 On Windows, from an Administrator PowerShell:
@@ -85,13 +88,13 @@ On Windows, from an Administrator PowerShell:
 powershell -ExecutionPolicy Bypass -File "$env:ProgramData\ur-vpn\client.ps1" -Action stop
 ```
 
-`-Action` can be `start`, `stop`, `restart`, `status`, `update`, `version` or `remove`.
+`-Action` can be `start`, `stop`, `restart`, `status`, `top`, `update`, `version` or `remove`.
 
 On devices, `on` and `off` still work as other names for `start` and `stop`.
 
 ### Updating
 
-`update` downloads the latest [release](https://github.com/Henryle-hd/ur-vps-ur-vpn/releases), checks it against the release's `SHA256SUMS`, and replaces the installed command. The checksum catches a damaged download. It can't protect against a compromised GitHub account, because the file and its checksum come from the same place.
+`update` downloads the latest [release](https://github.com/Henryle-hd/ur-vps-ur-vpn/releases), checks it against the release's `SHA256SUMS`, and replaces the installed command. The checksum catches a damaged download.
 
 On the server, it also rewrites the OpenVPN config and service from your saved settings. If either changed, the server restarts and clients reconnect by themselves, usually within seconds. If nothing changed, nobody is disconnected. If the new version won't start, the server goes back to the old one.
 
@@ -117,7 +120,7 @@ For example, on networks that block VPN traffic, TCP on port 443 looks most like
 curl -fsSL https://raw.githubusercontent.com/Henryle-hd/ur-vps-ur-vpn/main/server.sh | sudo env VPN_PROTO=tcp VPN_PORT=443 bash
 ```
 
-Settings are read at install time. To change them later, run `sudo ur-vpn uninstall` and install again, then set up your devices again.
+To change them later, run `sudo ur-vpn edit`, or edit `/etc/ur-vpn/ur-vpn.conf` yourself and run `sudo ur-vpn apply`. The VPN restarts with the new settings, or goes back to the old ones if it can't start. Changing `HOST`, `PORT` or `PROTO` means setting up every device again.
 
 ## What it supports
 

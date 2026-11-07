@@ -209,5 +209,78 @@ fi
 expect "macOS: starts at boot" grep -q 'RunAtLoad' "$WORK/test.plist"
 expect "macOS: plist runs the Homebrew openvpn" grep -q '/opt/homebrew/sbin/openvpn' "$WORK/test.plist"
 
+# --- The live view, with a fake tunnel ------------------------------------------
+
+PLATFORM=mac
+launchctl() { return 0; }
+route() { printf '   route to: 1.1.1.1\n  gateway: 10.8.0.1\n  interface: utun4\n'; }
+netstat() {
+	printf 'Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll\n'
+	printf 'utun4 1500 <Link#18> 200 0 5242880 100 0 1048576 0\n'
+	printf 'utun4 1500 10.8.0.2 10.8.0.2 200 0 5242880 100 0 1048576 -\n'
+}
+expect "top: reads the tunnel's bytes on macOS" test "$(mac_tunnel_bytes)" = "5242880 1048576"
+
+route() { printf '  interface: en0\n'; }
+expect "top: another route means no tunnel" test -z "$(mac_tunnel_bytes)"
+route() { printf '  interface: utun4\n'; }
+launchctl() { return 1; }
+expect "top: a stopped service means no tunnel" test -z "$(mac_tunnel_bytes)"
+launchctl() { return 0; }
+
+health_is() {
+	TOP_RX=$1 TOP_SENT=$2 TOP_LOST=$3 TOP_MISSES=$4 TOP_LATENCY=$5
+	case $(top_health) in
+	"$6"*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+expect "top: not connected" health_is "" 0 0 0 "" "not connected"
+expect "top: checking before the first ping" health_is 1 0 0 0 "" "checking"
+expect "top: good" health_is 1 5 0 0 "20.5" "good"
+expect "top: slow on high latency" health_is 1 5 0 0 "450.1" "slow"
+expect "top: slow on packet loss" health_is 1 10 2 0 "20.5" "slow"
+expect "top: one lost ping is not an outage" health_is 1 1 1 1 "" "good"
+expect "top: no internet after several lost pings" health_is 1 5 3 3 "" "no internet"
+
+record_halves() {
+	TOP_SENT=39 TOP_LOST=4
+	top_record_ping ""
+	[[ $TOP_SENT == 20 && $TOP_LOST == 2 ]]
+}
+expect "top: loss is about recent pings" record_halves
+
+a_reply_clears_misses() {
+	TOP_SENT=0 TOP_LOST=0 TOP_MISSES=0 TOP_LATENCY=""
+	top_record_ping ""
+	top_record_ping 30.0
+	[[ $TOP_MISSES == 0 && $TOP_LATENCY == 30.0 ]]
+}
+expect "top: a reply clears the missed pings" a_reply_clears_misses
+
+ping_reads_ms() {
+	mac_ping_ms() { printf 'PING\n64 bytes from 1.1.1.1: icmp_seq=0 ttl=57 time=34.2 ms\n'; }
+	[[ $(top_ping) == 34.2 ]]
+}
+expect "top: reads the round trip from ping" ping_reads_ms
+
+frame_shows() {
+	TOP_RX=5242880 TOP_TX=1048576 TOP_RX_RATE=2097152 TOP_TX_RATE=1024 TOP_SENT=1 TOP_LOST=0
+	TOP_LATENCY=34.2 TOP_PUBLIC_IP=203.0.113.9 TOP_SERVER=203.0.113.9:1194/udp
+	top_frame | grep "$1" >/dev/null
+}
+expect "top: shows the speed" frame_shows 'down 2.0 MB/s'
+expect "top: shows the upload" frame_shows 'up 1.0 KB/s'
+expect "top: shows the total" frame_shows 'down 5.0 MB'
+expect "top: shows the latency" frame_shows '34.2 ms'
+expect "top: shows the server" frame_shows '203.0.113.9:1194/udp'
+
+prints_once_when_not_a_terminal() {
+	public_ip() { printf '203.0.113.9'; }
+	has() { return 1; }
+	cmd_top --once | grep 'Public IP  203.0.113.9' >/dev/null
+}
+expect "top: --once prints one frame and returns" prints_once_when_not_a_terminal
+
 printf '\n%s passed, %s failed\n' "$passed" "$failed"
 ((failed == 0))
