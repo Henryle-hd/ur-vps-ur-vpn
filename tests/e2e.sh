@@ -315,13 +315,28 @@ test_top() {
 	check "server top shows the machine's load" on_server 'ur-vpn top --once | grep -q "^Server *load "'
 	check "server top prints no errors" on_server '! ur-vpn top --once 2>&1 | grep -Eq "awk:|ERROR"'
 	check "server top lists the login" on_server 'ur-vpn top --once | grep -q "client1 connected from"'
-	check "server top lists the disconnect" on_server 'ur-vpn top --once | grep -q "client1 disconnected"'
+	check "server live view shows a client leaving" live_view_sees_departure
 	check "server live view closes on q" on_server '(sleep 3; printf q) | timeout 20 script -qec "ur-vpn top" /dev/null | grep -q "Endpoint"'
 
 	check "client top says connected" on_client 'ur-vpn top --once | grep -q "^VPN *connected"'
 	check "client top reaches a verdict" on_client '! ur-vpn top --once | grep -q "^Health *checking"'
 	check "client top counts traffic" on_client 'curl -4 -fsS --max-time 15 https://api.ipify.org >/dev/null; ur-vpn top --once | grep -Eq "^Total +down [0-9.]+ [KMG]?B"'
 	check "client live view closes on q" on_client '(sleep 3; printf q) | timeout 20 script -qec "ur-vpn top" /dev/null | grep -q "Health"'
+}
+
+# Watch the server's live view while the client reconnects. The status file is the
+# source, so this holds on every OpenVPN version.
+live_view_sees_departure() {
+	local screen
+	screen=$(mktemp)
+	on_server '(sleep 14; printf q) | timeout 30 script -qec "ur-vpn top" /dev/null' >"$screen" 2>&1 &
+	sleep 4
+	on_client 'ur-vpn restart' >/dev/null 2>&1
+	wait
+	grep -q "client1 disconnected" "$screen"
+	local found=$?
+	rm -f "$screen"
+	return "$found"
 }
 
 # Move the client to the server's current profile, the way a person sets it up again.
