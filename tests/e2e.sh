@@ -330,6 +330,23 @@ client_follows_server() {
 	on_client 'UR_VPN_RAW=file:///repo bash /repo/client.sh /tmp/moved.ovpn'
 }
 
+# Both ends' recent logs, so a failure in CI can be understood from its output.
+show_tunnel_logs() {
+	printf '        --- client log\n'
+	on_client 'journalctl -u ur-vpn-client --no-pager -n 25' 2>&1 | sed 's/^/        /'
+	printf '        --- server log\n'
+	on_server 'journalctl -u ur-vpn-server --no-pager -n 25' 2>&1 | sed 's/^/        /'
+}
+
+moves_client() {
+	if client_follows_server >/dev/null 2>&1; then
+		ok "$1"
+	else
+		bad "$1"
+		show_tunnel_logs
+	fi
+}
+
 restore_settings() { on_server "cp /tmp/ur-vpn.conf.good $USER_CONF && ur-vpn apply"; }
 
 set_setting() { on_server "sed -i 's/^$1=.*/$1=$2/' $USER_CONF"; }
@@ -381,7 +398,7 @@ test_settings() {
 	check "the server listens on the new port" on_server "ss -ln | grep -q ':$moved '"
 	check "the server left the old port" on_server "! ss -ln | grep -q ':$port '"
 	check "profiles get the new port" on_server "ur-vpn show client1 --raw | grep -Eq '^remote .* $moved\$'"
-	check "a device can move to the new port" client_follows_server
+	moves_client "a device can move to the new port"
 	check "the client connects through the new port" server_sees_client
 	check "a moved client reaches the internet" on_client 'curl -4 -fsS --max-time 15 https://api.ipify.org'
 
@@ -394,7 +411,7 @@ test_settings() {
 	check "a failed apply keeps the old profiles" on_server "ur-vpn show client1 --raw | grep -Eq '^remote .* $moved\$'"
 
 	check "moving back to the first port succeeds" on_server 'ur-vpn apply'
-	check "a device can move back" client_follows_server
+	moves_client "a device can move back"
 	check "the client connects on the first port again" server_sees_client
 	check "the first port is the same protocol" on_server "ur-vpn show client1 --raw | grep -q '^proto $proto'"
 
