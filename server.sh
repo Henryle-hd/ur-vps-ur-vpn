@@ -1003,8 +1003,11 @@ start_service() {
 	restart_service
 }
 
+# systemd refuses a sixth start within 10 seconds. A person applying settings or
+# restarting by hand should never hit that, so clear the count first.
 restart_service() {
 	if [[ $INIT_SYSTEM == systemd ]]; then
+		systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 		systemctl restart "$SERVICE"
 	else
 		rc-service "$SERVICE" restart
@@ -1381,8 +1384,10 @@ cmd_apply() {
 	else
 		show_service_log 15 >&2 || true
 		use_settings "$old_host" "$old_port" "$old_proto" "$old_dns"
-		restart_service || true
-		die "the VPN did not start with the new settings, so it went back to the old ones. Your edits are still in $USER_SETTINGS."
+		if restart_service && wait_until 10 server_is_up; then
+			die "the VPN did not start with the new settings, so it went back to the old ones. Your edits are still in $USER_SETTINGS."
+		fi
+		die "the VPN did not start with the new settings, so it went back to the old ones, but it did not start with those either. See: ur-vpn logs"
 	fi
 	print_apply_advice "$old_host $old_port $old_proto" "$old_dns"
 }
@@ -1440,12 +1445,13 @@ function duration(s) {
 }'
 
 TOP_RX=0 TOP_TX=0 TOP_AT=0 TOP_RX_RATE=0 TOP_TX_RATE=0
-TOP_STATUS_TIME="" TOP_CLIENTS="" TOP_ROWS="" TOP_ACTIVITY="" TOP_TICKS=0
+TOP_STATUS_TIME="" TOP_CLIENTS="" TOP_ROWS="" TOP_ACTIVITY="" TOP_GONE="" TOP_TICKS=0
 
 top_sample() {
+	local gone_before=$TOP_GONE
 	top_sample_tunnel
 	top_sample_clients
-	if ((TOP_TICKS % 3 == 0)); then
+	if ((TOP_TICKS % 3 == 0)) || [[ $TOP_GONE != "$gone_before" ]]; then
 		TOP_ACTIVITY=$(top_activity)
 	fi
 	TOP_TICKS=$((TOP_TICKS + 1))
@@ -1479,7 +1485,34 @@ top_sample_clients() {
 	[[ $time != "$TOP_STATUS_TIME" ]] || return 0
 	clients=$(top_read_clients)
 	TOP_ROWS=$(top_client_rows "$clients" "$((time - ${TOP_STATUS_TIME:-$time}))")
+	if [[ -n $TOP_STATUS_TIME ]]; then
+		top_note_departures "$clients"
+	fi
 	TOP_CLIENTS=$clients TOP_STATUS_TIME=$time
+}
+
+# A session that was in the status file and is not any more has ended. This works
+# on every OpenVPN version, unlike the log, which only some versions write it to.
+top_note_departures() {
+	local gone
+	gone=$(PREVIOUS=$TOP_CLIENTS CURRENT=$1 NOW=$(date +%H:%M:%S) awk -F'\t' '
+		BEGIN {
+			count = split(ENVIRON["CURRENT"], lines, "\n")
+			for (i = 1; i <= count; i++) {
+				split(lines[i], field, "\t")
+				here[field[1] "/" field[7]] = 1
+			}
+			count = split(ENVIRON["PREVIOUS"], lines, "\n")
+			for (i = 1; i <= count; i++) {
+				split(lines[i], field, "\t")
+				session = field[1] "/" field[7]
+				if (field[1] != "" && !(session in here))
+					printf "%s\t%s\t%s disconnected\n", ENVIRON["NOW"], session, field[1]
+			}
+		}')
+	if [[ -n $gone ]]; then
+		TOP_GONE=$(printf '%s\n%s\n' "$TOP_GONE" "$gone" | awk 'NF' | tail -n 20)
+	fi
 }
 
 # name, address, VPN IP, bytes to it, bytes from it, connected since. Columns come
@@ -1491,10 +1524,12 @@ top_read_clients() {
 			next
 		}
 		$1 == "CLIENT_LIST" && $2 != "UNDEF" {
-			address = $(column["Real Address"])
+			endpoint = $(column["Real Address"])
+			sub(/^::ffff:/, "", endpoint)
+			address = endpoint
 			sub(/:[0-9]+$/, "", address)
-			printf "%s\t%s\t%s\t%s\t%s\t%s\n", $2, address, $(column["Virtual Address"]),
-				$(column["Bytes Sent"]), $(column["Bytes Received"]), $(column["Connected Since (time_t)"])
+			printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $2, address, $(column["Virtual Address"]),
+				$(column["Bytes Sent"]), $(column["Bytes Received"]), $(column["Connected Since (time_t)"]), endpoint
 		}' "$STATUS_FILE"
 }
 
@@ -1521,37 +1556,52 @@ top_client_rows() {
 		}' <<<"$1"
 }
 
-# The latest logins, disconnects and refused connections, newest first. Only the
-# parts matched below are shown, so nothing a stranger sends reaches the terminal.
-# A client's goodbye shows as "Delayed exit": the "CC-EEN" line is debug output
-# only some builds print. One session can log several of these, so count it once.
+# The latest logins, disconnects and refused connections, newest first: what the
+# log says, plus the departures the live view saw in the status file. A session's
+# end is often reported by both, and sometimes twice by the log, so it counts once.
 top_activity() {
+	{
+		top_log_events
+		printf '%s\n' "$TOP_GONE"
+	} | awk -F'\t' 'NF == 3' | sort -s -t "$(printf '\t')" -k1,1 | awk -F'\t' '
+		$3 ~ / disconnected$/ {
+			if ($2 in gone) next
+			gone[$2] = 1
+		}
+		{ lines[++count] = $1 "  " $3 }
+		END { for (i = count; i > 0 && i > count - 8; i--) print lines[i] }'
+}
+
+# time, session, event. Only the parts matched below are printed, so nothing a
+# stranger sends can reach the terminal. Some versions log a client's goodbye as
+# "Delayed exit", and some builds also print a "CC-EEN" debug line.
+top_log_events() {
 	{ show_service_log 2000 2>/dev/null || true; } | awk '
 		!match($0, /[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) { next }
-		{ time = substr($0, RSTART, 8); event = "" }
+		{ time = substr($0, RSTART, 8) }
 		/Peer Connection Initiated with/ && match($0, /\[[A-Za-z0-9_-]+\] Peer Connection/) {
 			name = substr($0, RSTART + 1)
 			sub(/\].*/, "", name)
 			from = $0
 			sub(/.*Peer Connection Initiated with \[[^]]*\]/, "", from)
 			sub(/^::ffff:/, "", from)
-			sub(/:[0-9]+.*$/, "", from)
-			event = name " connected from " from
+			endpoint = from
+			sub(/[^0-9a-fA-F:.].*$/, "", endpoint)
+			sub(/:[0-9]+$/, "", from)
+			sub(/[^0-9a-fA-F:.].*$/, "", from)
+			printf "%s\t%s/%s\t%s connected from %s\n", time, name, endpoint, name, from
 		}
 		/Delayed exit in|CC-EEN exit message|client-instance (exiting|restarting)/ && match($0, /[A-Za-z0-9_-]+\/[0-9a-fA-F:.]+ /) {
-			session = substr($0, RSTART, RLENGTH)
-			if (!(session in gone)) {
-				gone[session] = 1
-				name = session
-				sub(/\/.*/, "", name)
-				event = name " disconnected"
-			}
+			session = substr($0, RSTART, RLENGTH - 1)
+			sub(/\/::ffff:/, "/", session)
+			name = session
+			sub(/\/.*/, "", name)
+			printf "%s\t%s\t%s disconnected\n", time, session, name
 		}
 		/certificate revoked/ && match($0, /CN=[A-Za-z0-9_-]+/) {
-			event = "refused revoked client " substr($0, RSTART + 3, RLENGTH - 3)
-		}
-		event != "" { lines[++count] = time "  " event }
-		END { for (i = count; i > 0 && i > count - 8; i--) print lines[i] }'
+			name = substr($0, RSTART + 3, RLENGTH - 3)
+			printf "%s\trevoked/%s\trefused revoked client %s\n", time, name, name
+		}'
 }
 
 top_health() {
