@@ -1523,6 +1523,8 @@ top_client_rows() {
 
 # The latest logins, disconnects and refused connections, newest first. Only the
 # parts matched below are shown, so nothing a stranger sends reaches the terminal.
+# A client's goodbye shows as "Delayed exit": the "CC-EEN" line is debug output
+# only some builds print. One session can log several of these, so count it once.
 top_activity() {
 	{ show_service_log 2000 2>/dev/null || true; } | awk '
 		!match($0, /[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) { next }
@@ -1536,7 +1538,7 @@ top_activity() {
 			sub(/:[0-9]+.*$/, "", from)
 			event = name " connected from " from
 		}
-		/CC-EEN exit message|client-instance (exiting|restarting)/ && match($0, /[A-Za-z0-9_-]+\/[0-9a-fA-F:.]+ /) {
+		/Delayed exit in|CC-EEN exit message|client-instance (exiting|restarting)/ && match($0, /[A-Za-z0-9_-]+\/[0-9a-fA-F:.]+ /) {
 			session = substr($0, RSTART, RLENGTH)
 			if (!(session in gone)) {
 				gone[session] = 1
