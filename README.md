@@ -42,14 +42,18 @@ It installs OpenVPN, connects, checks that your traffic goes through the VPN, an
 
 From a clone, use `bash client.sh` or `powershell -ExecutionPolicy Bypass -File client.ps1`.
 
-**Phones:** install [OpenVPN Connect](https://openvpn.net/client/). Scan the code with your phone's camera, or tap the link if you're reading this on your phone.
+### Prefer an app?
+
+Any device can use an app instead of the command line. Install it, run `sudo ur-vpn app NAME` on the server, and import the saved `NAME.ovpn` file into the app.
+
+- **Windows and macOS:** [OpenVPN Connect](https://openvpn.net/client/)
+- **Linux:** no app needed. Open Settings, then Network, then VPN, and choose Import from file.
+- **iPhone, iPad and Android:** OpenVPN Connect. Scan the code with your phone's camera, or tap the link if you're reading this on your phone.
 
 | iPhone and iPad | Android |
 | --- | --- |
 | <a href="https://apps.apple.com/app/openvpn-connect/id590379981"><img src="assets/qr-app-store.png" width="200" alt="QR code for OpenVPN Connect on the App Store"></a> | <a href="https://play.google.com/store/apps/details?id=net.openvpn.openvpn"><img src="assets/qr-google-play.png" width="200" alt="QR code for OpenVPN Connect on Google Play"></a> |
 | [App Store](https://apps.apple.com/app/openvpn-connect/id590379981) | [Google Play](https://play.google.com/store/apps/details?id=net.openvpn.openvpn) |
-
-Then run `sudo ur-vpn app NAME` on the server and import the saved `NAME.ovpn` file into the app.
 
 ## Everyday commands
 
@@ -57,10 +61,10 @@ On the server:
 
 | Command | What it does |
 | --- | --- |
-| `sudo ur-vpn add laptop` | Create a client for another device and print its block |
-| `sudo ur-vpn show laptop` | Print a client's block again (`--raw` for an `.ovpn` file) |
-| `sudo ur-vpn app phone` | Save a client's `.ovpn` file for the OpenVPN Connect app |
-| `sudo ur-vpn revoke laptop` | Cut off a client right away |
+| `sudo ur-vpn add NAME` | Create a client for another device and print its block |
+| `sudo ur-vpn show NAME` | Print a client's block again (`--raw` for an `.ovpn` file) |
+| `sudo ur-vpn app NAME` | Save a client's `.ovpn` file for an app |
+| `sudo ur-vpn revoke NAME` | Cut off a client right away |
 | `sudo ur-vpn list` | List clients |
 | `sudo ur-vpn start` | Start the VPN, and start it at boot |
 | `sudo ur-vpn stop` | Stop the VPN, and keep it off, even after a reboot, until you start it |
@@ -74,7 +78,7 @@ On the server:
 | `sudo ur-vpn version` | Print the installed version |
 | `sudo ur-vpn uninstall` | Remove the VPN, its firewall rules and all certificates |
 
-Use one client per device. The block is a login, so treat it like a password. A client that is already connected keeps working until you revoke it.
+`NAME` is any name you choose for the device, such as `laptop` or `phone`. Use one client per device. The block is a login, so treat it like a password. A client that is already connected keeps working until you revoke it.
 
 On macOS and Linux devices:
 
